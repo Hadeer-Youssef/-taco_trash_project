@@ -1,0 +1,61 @@
+taco_category_id,taco_category,taco_supercategory,material_6class,recyclability_binary,n_annotations,mapped_via,notes
+0,Aluminium foil,Aluminium foil,metal,recyclable,62,name,clean foil recyclable; greasy often rejected
+1,Battery,Battery,trash,non_recyclable,2,name,hazardous - special disposal
+2,Aluminium blister pack,Blister pack,metal,non_recyclable,6,name,mixed material foil+plastic
+3,Carded blister pack,Blister pack,trash,non_recyclable,1,name,mixed card+plastic blister
+4,Other plastic bottle,Bottle,plastic,recyclable,50,name,HDPE rigid
+5,Clear plastic bottle,Bottle,plastic,recyclable,285,name,PET rigid
+6,Glass bottle,Bottle,glass,recyclable,104,name,
+7,Plastic bottle cap,Bottle cap,plastic,recyclable,209,name,
+8,Metal bottle cap,Bottle cap,metal,recyclable,80,name,
+9,Broken glass,Broken glass,glass,recyclable,138,name,often rejected if shattered
+10,Food Can,Can,metal,recyclable,34,name,
+11,Aerosol,Can,metal,recyclable,10,name,must be empty
+12,Drink can,Can,metal,recyclable,229,name,
+13,Toilet tube,Carton,cardboard,recyclable,5,name,cardboard tube
+14,Other carton,Carton,cardboard,recyclable,93,name,
+15,Egg carton,Carton,cardboard,recyclable,11,name,
+16,Drink carton,Carton,cardboard,non_recyclable,45,name,Tetra Pak - depends on facility
+17,Corrugated carton,Carton,cardboard,recyclable,64,name,
+18,Meal carton,Carton,cardboard,non_recyclable,30,name,often food-soiled
+19,Pizza box,Carton,cardboard,non_recyclable,3,name,grease contamination
+20,Paper cup,Cup,paper,non_recyclable,67,name,plastic-lined - usually rejected
+21,Disposable plastic cup,Cup,plastic,non_recyclable,104,name,
+22,Foam cup,Cup,trash,non_recyclable,13,name,EPS
+23,Glass cup,Cup,glass,recyclable,6,name,
+24,Other plastic cup,Cup,plastic,non_recyclable,2,name,
+25,Food waste,Food waste,trash,non_recyclable,8,name,organic - compost not recycle
+26,Glass jar,Glass jar,glass,recyclable,6,name,
+27,Plastic lid,Lid,plastic,non_recyclable,77,name,small film/thin items often rejected
+28,Metal lid,Lid,metal,recyclable,10,name,
+29,Other plastic,Other plastic,plastic,non_recyclable,273,name,mixed/unknown polymer
+30,Magazine paper,Paper,paper,recyclable,12,name,
+31,Tissues,Paper,paper,non_recyclable,42,name,soiled/low grade
+32,Wrapping paper,Paper,paper,non_recyclable,12,name,often coated/glittered
+33,Normal paper,Paper,paper,recyclable,82,name,
+34,Paper bag,Paper bag,paper,recyclable,27,name,
+35,Plastified paper bag,Paper bag,paper,non_recyclable,0,name,mixed material
+36,Plastic film,Plastic bag & wrapper,plastic,non_recyclable,451,name,films not accepted curbside
+37,Six pack rings,Plastic bag & wrapper,plastic,non_recyclable,5,name,"film/rings - not accepted curbside, wildlife hazard"
+38,Garbage bag,Plastic bag & wrapper,plastic,non_recyclable,31,name,film
+39,Other plastic wrapper,Plastic bag & wrapper,plastic,non_recyclable,260,name,film
+40,Single-use carrier bag,Plastic bag & wrapper,plastic,non_recyclable,61,name,film
+41,Polypropylene bag,Plastic bag & wrapper,plastic,non_recyclable,3,name,film
+42,Crisp packet,Plastic bag & wrapper,plastic,non_recyclable,39,name,metallized film
+43,Spread tub,Plastic container,plastic,recyclable,9,name,rigid PP if clean
+44,Tupperware,Plastic container,plastic,recyclable,4,name,rigid
+45,Disposable food container,Plastic container,plastic,non_recyclable,38,name,often contaminated
+46,Foam food container,Plastic container,trash,non_recyclable,15,name,EPS/styrofoam
+47,Other plastic container,Plastic container,plastic,recyclable,6,name,if rigid and clean
+48,Plastic glooves,Plastic glooves,plastic,non_recyclable,4,name,
+49,Plastic utensils,Plastic utensils,plastic,non_recyclable,37,name,small items
+50,Pop tab,Pop tab,metal,recyclable,99,name,
+51,Rope & strings,Rope & strings,trash,non_recyclable,29,name,tangles machinery
+52,Scrap metal,Scrap metal,metal,recyclable,20,name,
+53,Shoe,Shoe,trash,non_recyclable,7,name,
+54,Squeezable tube,Squeezable tube,plastic,non_recyclable,7,name,mixed material
+55,Plastic straw,Straw,plastic,non_recyclable,157,name,small/film
+56,Paper straw,Straw,paper,non_recyclable,4,name,small item
+57,Styrofoam piece,Styrofoam piece,trash,non_recyclable,112,name,EPS
+58,Unlabeled litter,Unlabeled litter,trash,non_recyclable,517,name,
+59,Cigarette,Cigarette,trash,non_recyclable,667,name,litter

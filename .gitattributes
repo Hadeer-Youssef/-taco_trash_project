@@ -1,0 +1,2 @@
+trashnet_dataset-resized/** filter=lfs diff=lfs merge=lfs -text
+crops_material/** filter=lfs diff=lfs merge=lfs -text
