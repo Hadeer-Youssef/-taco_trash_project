@@ -397,7 +397,11 @@ def eval_model(model, loader, device, is_inception, n_samples=12, warmup_batches
     flattens/truncates to n_samples at the end so the report grid actually
     spans classes (and both recyclable/non-recyclable) rather than just one."""
     model.to(device).eval()
-    ym, pm, yr, probs_all = [], [], [], []
+    # material_true/material_pred: the model's actual classification task (6 classes).
+    # recyclable_true: manual ground-truth label from manifest.csv (never predicted).
+    # recyclable_from_rule: NOT a model output -- MATERIAL_RECYCLABLE[material_pred],
+    # i.e. recyclability derived deterministically from the predicted material.
+    material_true, material_pred, recyclable_true, probs_all = [], [], [], []
     per_class_samples = {c: [] for c in range(len(MATERIALS))}
     batch_times, n_timed_images = [], 0
     gpu_sampler = GpuUtilSampler()
@@ -417,15 +421,14 @@ def eval_model(model, loader, device, is_inception, n_samples=12, warmup_batches
 
             probs = F.softmax(logits, dim=1).cpu()
             pred = probs.argmax(1)
-            pm += pred.tolist(); ym += y.tolist(); yr += rec.tolist()
+            material_pred += pred.tolist(); material_true += y.tolist(); recyclable_true += rec.tolist()
             probs_all.append(probs)
             for i in range(x.size(0)):
                 y_i = int(y[i])
                 if len(per_class_samples[y_i]) < samples_per_class:
                     per_class_samples[y_i].append((x[i].cpu(), y_i, int(pred[i]), int(rec[i])))
     probs_all = torch.cat(probs_all).numpy()
-    # recyclability via material rule (deterministic) and reported alongside material
-    pr = [MATERIAL_RECYCLABLE[i] for i in pm]
+    recyclable_from_rule = [MATERIAL_RECYCLABLE[i] for i in material_pred]
 
     sample_imgs = [s for class_samples in per_class_samples.values() for s in class_samples][:n_samples]
 
@@ -434,21 +437,29 @@ def eval_model(model, loader, device, is_inception, n_samples=12, warmup_batches
     throughput_ips = (n_timed_images / total_time) if total_time > 0 else None
     gpu_stats = gpu_sampler.summary()
 
+    # "always guess the majority recyclability class" baseline -- recyclability_acc
+    # is only meaningful evidence of learning once it clears this trivial floor,
+    # since a skewed test set (e.g. TrashNet's ~95% recyclable) lets a model that
+    # learned nothing score highly by always predicting the majority class.
+    majority_class = 1 if sum(recyclable_true) >= len(recyclable_true) / 2 else 0
+    majority_baseline_acc = sum(1 for v in recyclable_true if v == majority_class) / len(recyclable_true)
+
     return {
-        "material_acc": accuracy_score(ym, pm),
-        "material_macro_f1": f1_score(ym, pm, average="macro", zero_division=0),
-        "binary_acc": accuracy_score(yr, pr),
-        "binary_macro_f1": f1_score(yr, pr, average="macro", zero_division=0),
-        "non_recyclable_recall": recall_score(yr, pr, pos_label=0, zero_division=0),
-        "material_cm": confusion_matrix(ym, pm, labels=list(range(6))).tolist(),
-        "material_report": classification_report(ym, pm, labels=list(range(6)),
+        "material_acc": accuracy_score(material_true, material_pred),
+        "material_macro_f1": f1_score(material_true, material_pred, average="macro", zero_division=0),
+        "recyclability_acc": accuracy_score(recyclable_true, recyclable_from_rule),
+        "recyclability_acc_majority_baseline": majority_baseline_acc,
+        "recyclability_macro_f1": f1_score(recyclable_true, recyclable_from_rule, average="macro", zero_division=0),
+        "non_recyclable_recall": recall_score(recyclable_true, recyclable_from_rule, pos_label=0, zero_division=0),
+        "material_cm": confusion_matrix(material_true, material_pred, labels=list(range(6))).tolist(),
+        "material_report": classification_report(material_true, material_pred, labels=list(range(6)),
                                                   target_names=MATERIALS,
                                                   zero_division=0, output_dict=True),
         "inference_latency_ms_per_image": latency_ms_per_image,
         "inference_throughput_images_per_sec": throughput_ips,
         "inference_gpu_util_avg_pct": gpu_stats["gpu_util_avg_pct"],
         "inference_gpu_util_max_pct": gpu_stats["gpu_util_max_pct"],
-        "y_true": ym,
+        "y_true": material_true,
         "y_probs": probs_all,
         "samples": sample_imgs,
     }
@@ -522,20 +533,26 @@ def plot_model_report(name, history, eval_out, out_dir="reports"):
             fontsize=9, ha="center", va="bottom", transform=ax.transAxes)
     n_show = min(12, len(eval_out["samples"]))
     if n_show:
-        # height_ratios gives the title row breathing room above the 3x4 image grid
-        inner = gs[2, 1].subgridspec(4, 4, height_ratios=[0.15, 1, 1, 1])
+        # height_ratios gives the title row breathing room above the 3x4 image
+        # grid; hspace adds vertical gap BETWEEN grid rows so a tile's 2-line
+        # caption (material + recyclability, x2 for true/pred) never collides
+        # with the images in the row above it.
+        inner = gs[2, 1].subgridspec(4, 4, height_ratios=[0.25, 1, 1, 1], hspace=0.9)
         rec_label = {1: "recyclable", 0: "non-recyclable"}
-        # NOTE: recyclability here is the dataset's manual ground-truth label
-        # (from label_mapping.csv's item-aware policy), not a model output --
-        # the model only predicts material.
+        # NOTE: "true" recyclability is the dataset's manual ground-truth label
+        # (from label_mapping.csv's item-aware policy) -- never a model output.
+        # "pred" recyclability is derived from the model's predicted material
+        # via MATERIAL_RECYCLABLE, i.e. a deterministic rule applied after the
+        # fact, not something the network predicts directly.
         for k in range(n_show):
             img_t, y_i, p_i, rec_i = eval_out["samples"][k]
             a = fig.add_subplot(inner[1 + k // 4, k % 4])
             a.imshow(_denorm(img_t))
             correct = y_i == p_i
+            pred_rec = rec_label[MATERIAL_RECYCLABLE[p_i]]
             a.set_title(f"true:{MATERIALS[y_i]} ({rec_label[rec_i]})\n"
-                        f"pred:{MATERIALS[p_i]}",
-                        fontsize=6, color="black" if correct else "red")
+                        f"pred:{MATERIALS[p_i]} ({pred_rec})",
+                        fontsize=6, color="black" if correct else "red", pad=3)
             a.axis("off")
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
@@ -608,6 +625,11 @@ def main():
     ap.add_argument("--log_file", default=None,
                     help="also write the run log to this file (default: "
                          "<out-without-.json>.log next to the results JSON)")
+    ap.add_argument("--ckpt_dir", default="checkpoints",
+                    help="where each backbone's best-epoch weights are saved "
+                         "(as <protocol>_<backbone>.pt), for later use with predict.py")
+    ap.add_argument("--no_ckpt", action="store_true",
+                    help="skip saving model checkpoints")
     args = ap.parse_args()
 
     out = args.out or f"results_{args.protocol}.json"
@@ -651,7 +673,16 @@ def main():
                                       class_weight=cw, val_loader=te, patience=args.patience)
         m = eval_model(model, te, device, is_inc)
         logger.info(f"  material_acc={m['material_acc']:.3f} macroF1={m['material_macro_f1']:.3f} "
-                    f"binary_acc={m['binary_acc']:.3f} non_rec_recall={m['non_recyclable_recall']:.3f}")
+                    f"recyclability_acc={m['recyclability_acc']:.3f} non_recyclable_recall={m['non_recyclable_recall']:.3f}")
+        base = m["recyclability_acc_majority_baseline"]
+        beats_baseline = m["recyclability_acc"] - base
+        logger.info(f"  recyclability_acc vs. trivial 'always guess majority class' baseline "
+                    f"({base:.3f}): {'+' if beats_baseline >= 0 else ''}{beats_baseline:.3f} "
+                    + ("-- barely above the trivial baseline, treat recyclability_acc with caution"
+                       if beats_baseline < 0.03 else "-- clears the trivial baseline"))
+        logger.info(f"  read non_recyclable_recall as the trustworthy number: of all truly "
+                    f"non-recyclable items, the model correctly caught {m['non_recyclable_recall']*100:.1f}% "
+                    f"of them (higher is always better here, unlike recyclability_acc above)")
         lat = m["inference_latency_ms_per_image"]
         thr = m["inference_throughput_images_per_sec"]
         gpu_i = m["inference_gpu_util_avg_pct"]
@@ -664,6 +695,28 @@ def main():
 
         if not args.no_report:
             plot_model_report(name, history, m, out_dir=args.report_dir)
+
+        if not args.no_ckpt:
+            os.makedirs(args.ckpt_dir, exist_ok=True)
+            ckpt_path = os.path.join(args.ckpt_dir, f"{args.protocol}_{name}.pt")
+            torch.save({
+                "backbone": name,
+                "finetune_head": args.finetune_head,
+                "input_size": input_size,
+                "materials": MATERIALS,
+                "material_recyclable": MATERIAL_RECYCLABLE,
+                "protocol": args.protocol,
+                "aug_mode": aug_mode,
+                "class_weighted": args.class_weighted,
+                "material_acc": m["material_acc"],
+                "recyclability_acc": m["recyclability_acc"],
+                "non_recyclable_recall": m["non_recyclable_recall"],
+                "best_epoch": history.get("best_epoch"),
+                "model_state_dict": model.state_dict(),
+            }, ckpt_path)
+            logger.info(f"  saved checkpoint {ckpt_path}  (best epoch: "
+                        f"{history.get('best_epoch', args.epochs)}, "
+                        f"material_acc={m['material_acc']:.3f})")
 
         # drop the heavy per-sample arrays before serializing to JSON
         m_json = {k: v for k, v in m.items() if k not in ("y_true", "y_probs", "samples")}

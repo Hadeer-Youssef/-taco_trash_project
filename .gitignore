@@ -1,4 +1,4 @@
-# ---- Large datasets (too big even for LFS free tier; download/regenerate, do not commit) ----
+ # ---- Large datasets (too big even for LFS free tier; download/regenerate, do not commit) ----
 Taco_data/
 update_Taco_classification/processed_data/
 update_Taco_classification/__pycache__/

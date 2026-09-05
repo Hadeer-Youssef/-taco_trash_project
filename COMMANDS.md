@@ -7,6 +7,8 @@ already run. Each run writes:
 - `results_<tag>.log` — full console log (timestamps, per-epoch loss/acc/F1,
   class weights if used, training time, GPU util, inference latency)
 - `reports_<tag>/report_<backbone>.png` — the 5-panel visual report
+- `checkpoints_<tag>/<protocol>_<backbone>.pt` — best-epoch weights + metadata
+  (unless `--no_ckpt` is passed), loadable by `predict.py` for inference
 
 Run everything for one backbone before moving to the next if you want to
 inspect results incrementally (see the earlier model-by-model workflow) —
@@ -28,14 +30,19 @@ python benchmark_backbones.py --protocol cross_domain --backbones mobilenet_v2 -
 
 ```bash
 # P1 in_domain (aug_mode auto-picks "mild")
-python benchmark_backbones.py --protocol in_domain --epochs 15 --out results_in_domain.json --report_dir reports_in_domain
+python benchmark_backbones.py --protocol in_domain --epochs 15 --out results_in_domain.json --report_dir reports_in_domain --ckpt_dir checkpoints_in_domain
 
 # P2 cross_domain — HEADLINE result (aug_mode auto-picks "strong")
-python benchmark_backbones.py --protocol cross_domain --epochs 15 --out results_cross_domain.json --report_dir reports_cross_domain
+python benchmark_backbones.py --protocol cross_domain --epochs 15 --out results_cross_domain.json --report_dir reports_cross_domain --ckpt_dir checkpoints_cross_domain
 
 # P3 joint (aug_mode auto-picks "strong")
-python benchmark_backbones.py --protocol joint --epochs 15 --out results_joint.json --report_dir reports_joint
+python benchmark_backbones.py --protocol joint --epochs 15 --out results_joint.json --report_dir reports_joint --ckpt_dir checkpoints_joint
 ```
+
+Each backbone's best-epoch weights land at
+`checkpoints_<protocol>/<protocol>_<backbone>.pt` (e.g.
+`checkpoints_cross_domain/cross_domain_resnet50.pt`) — pass `--no_ckpt` to
+skip saving if disk space is tight.
 
 Compare: `material_acc` / `material_macro_f1` should drop clearly from
 in_domain → cross_domain (the domain gap), and joint should sit between
@@ -200,9 +207,60 @@ print("train_time frozen/finetuned:", a["history"]["train_time_sec"], b["history
 
 ---
 
+## 9. Checkpoints — saving and running inference
+
+Every training run in sections 1–7 saves one checkpoint per backbone at
+`<--ckpt_dir>/<protocol>_<backbone>.pt` (best-epoch weights, restored via
+`--patience`'s best-state tracking when that flag is used). Skip saving
+with `--no_ckpt` if disk space is tight during a big sweep.
+
+```bash
+# checkpoint options on any training command:
+--ckpt_dir checkpoints_cross_domain   # where to save (default: ./checkpoints)
+--no_ckpt                             # skip saving checkpoints entirely
+```
+
+Each `.pt` file bundles everything `predict.py` needs to run standalone,
+without re-reading any training args: backbone name, `finetune_head` flag,
+input size, the `MATERIALS` list, the `MATERIAL_RECYCLABLE` rule, and the
+run's final metrics (`material_acc`, `recyclability_acc`,
+`non_recyclable_recall`, `best_epoch`) alongside the model weights.
+
+**Run inference on one or more images:**
+```bash
+python predict.py --ckpt checkpoints_cross_domain/cross_domain_resnet50.pt --image path/to/photo.jpg
+```
+prints, per image, the predicted material, its confidence, and the derived
+**RECYCLABLE** / **NON-RECYCLABLE** state (via `MATERIAL_RECYCLABLE`, the
+same rule used everywhere else in this repo — see the README's Q4 for why
+this is a derived rule output, not a direct model prediction).
+
+**Multiple images + full per-material probability breakdown:**
+```bash
+python predict.py --ckpt checkpoints_cross_domain/cross_domain_resnet50.pt \
+    --image img1.jpg img2.jpg img3.jpg --show_probs
+```
+
+**Compare checkpoints from different runs on the same image** (e.g. frozen
+vs. finetuned, or across backbones) by just swapping `--ckpt`:
+```bash
+python predict.py --ckpt checkpoints_cross_domain/cross_domain_resnet50_frozen.pt --image sample.jpg
+python predict.py --ckpt checkpoints_cross_domain/cross_domain_resnet50_finetuned.pt --image sample.jpg
+```
+
+The report PNG's bottom-right sample-prediction grid (from
+`plot_model_report`) already shows this same recyclable/non-recyclable
+state inline with both the true and predicted material label on every
+tile, spread across all 6 material classes — so you don't need `predict.py`
+just to eyeball a handful of examples from the test set; it's for running
+the model on **new** images outside the manifest.
+
+---
+
 ## Naming convention used above
 
 `results_<protocol>_<backbone>_<variant>.json` /
-`reports_<protocol>_<backbone>_<variant>/` — keep this consistent for any
-new comparison so `aggregate_results.py` and ad-hoc comparison scripts can
-find files by pattern later.
+`reports_<protocol>_<backbone>_<variant>/` /
+`checkpoints_<protocol>_<backbone>_<variant>/` — keep this consistent for
+any new comparison so `aggregate_results.py` and ad-hoc comparison scripts
+can find files by pattern later.

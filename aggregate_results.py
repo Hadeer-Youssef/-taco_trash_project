@@ -29,8 +29,8 @@ def best_backbone(res):
 def t3(in_d, cross, joint, out):
     with open(out, "w", encoding="utf-8") as f:
         f.write("# Table T3 — Main results (best backbone per protocol)\n\n")
-        f.write("| protocol | material acc | material macroF1 | binary acc | "
-                "binary macroF1 | non_rec recall |\n|---|---|---|---|---|---|\n")
+        f.write("| protocol | material acc | material macroF1 | recyclability acc | "
+                "recyclability macroF1 | non_rec recall |\n|---|---|---|---|---|---|\n")
         gap = {}
         for name, r in [("P1 in-domain", in_d), ("P2 cross-domain", cross),
                         ("P3 joint", joint)]:
@@ -39,8 +39,8 @@ def t3(in_d, cross, joint, out):
             bk, m = best_backbone(r)
             gap[name] = m["material_acc"]
             f.write(f"| {name} ({bk}) | {m['material_acc']:.3f} | "
-                    f"{m['material_macro_f1']:.3f} | {m['binary_acc']:.3f} | "
-                    f"{m['binary_macro_f1']:.3f} | {m['non_recyclable_recall']:.3f} |\n")
+                    f"{m['material_macro_f1']:.3f} | {m['recyclability_acc']:.3f} | "
+                    f"{m['recyclability_macro_f1']:.3f} | {m['non_recyclable_recall']:.3f} |\n")
         if "P1 in-domain" in gap and "P2 cross-domain" in gap:
             f.write(f"\n**Domain gap** = acc(P1) - acc(P2) = "
                     f"{gap['P1 in-domain'] - gap['P2 cross-domain']:.3f}\n")
@@ -53,12 +53,12 @@ def t3(in_d, cross, joint, out):
 def t4(cross, out):
     with open(out, "w", encoding="utf-8") as f:
         f.write("# Table T4 — Five-backbone benchmark on P2 (cross-domain)\n\n")
-        f.write("| backbone | material acc | material macroF1 | binary acc | non_rec recall |\n")
+        f.write("| backbone | material acc | material macroF1 | recyclability acc | non_rec recall |\n")
         f.write("|---|---|---|---|---|\n")
         for bk, m in sorted(cross["results"].items(),
                             key=lambda kv: -kv[1]["material_acc"]):
             f.write(f"| {bk} | {m['material_acc']:.3f} | {m['material_macro_f1']:.3f} | "
-                    f"{m['binary_acc']:.3f} | {m['non_recyclable_recall']:.3f} |\n")
+                    f"{m['recyclability_acc']:.3f} | {m['non_recyclable_recall']:.3f} |\n")
     print("wrote", out)
 
 

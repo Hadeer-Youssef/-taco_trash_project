@@ -472,3 +472,55 @@ Domain gap = (accuracy on clean data) − (accuracy of the same model on wild da
 Without TrashNet, there would be no "before" to compare against an "after," and the paper's central finding — that the model leans on background as a shortcut — would never have surfaced.
 
 **Bottom line:** TrashNet wasn't the goal — it was a necessary tool: it fixed data scarcity, gave a clean reference for what a material actually looks like, and, most importantly, made it possible to prove and measure that the problem exists in the first place.
+
+## سؤال 4 / Question 4 — إزاي recyclable/non-recyclable بتتماب للـ classes وبتتقاس فعليًا؟ ومعنى `binary_acc` و`non_rec_recall`
+
+### بالعربي
+
+**`binary_acc=0.946` و`non_rec_recall=0.733` — دول معناهم إيه بالظبط، وهل recyclable/non-recyclable فعلاً متماپة لكل الـ classes وقابلة للقياس؟**
+
+أيوه، بالظبط كده — عن طريق جدول ثابت مش قرار من الموديل:
+
+```python
+MATERIALS = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+MATERIAL_RECYCLABLE = [1, 1, 1, 1, 1, 0]
+```
+
+كل مادة (class) بتتربط بـ recyclable (1) أو non-recyclable (0): الخمس classes الأولى recyclable، وtrash بس هي non-recyclable.
+
+**مصدر كل رقم:**
+| المتغير | مصدره | يمثل إيه |
+|---|---|---|
+| `yr` | عمود `recyclable` في `manifest.csv` | **الحقيقة الفعلية** (label يدوي أصله من `label_mapping.csv`) |
+| `pr` | مُشتق من تنبؤ الموديل بالمادة (`pm`) عن طريق `MATERIAL_RECYCLABLE[pm]` | **نتيجة مُستنتجة**، مش تنبؤ مباشر من الموديل |
+
+**`binary_acc=0.946`** = نسبة الصور اللي فيها `yr` (الحقيقة) طابقت `pr` (المُستنتج) = 94.6% من صور الاختبار جت النتيجة النهائية صح. **لكن الرقم ده ممكن يضلل** لو الداتا متحيزة — في TrashNet مثلاً 94.6% من الصور أصلاً recyclable، فموديل غبي يقول "الكل recyclable" هيوصل لنفس الرقم من غير ما يتعلم حاجة.
+
+**`non_rec_recall=0.733`** = من كل الصور اللي حقيقتها **non-recyclable فعلاً**، الموديل مسك **73.3%** بس منها صح (والـ 26.7% الباقيين اتصنفوا غلط كـ recyclable). ده الرقم الأهم عمليًا، لأنه بيقيس تحديدًا "هل الموديل بيمسك الحالات الخطرة اللي ممكن تلوّث دفعة إعادة التدوير؟" وهو أضعف بكتير من الـ accuracy العام، وده بالظبط سبب إن `methodology.md` بيركز عليه كمقياس أساسي مش الـ accuracy وحده.
+
+**خلاصة:** الموديل مبيتنبأش بـ recyclable مباشرة — بيتنبأ بالمادة، والقرار النهائي بيتشتق بقاعدة ثابتة قابلة للقياس والتفسير الكامل.
+
+### In English
+
+**What exactly do `binary_acc=0.946` and `non_rec_recall=0.733` mean, and is recyclable/non-recyclable actually mapped to the classes and measurable?**
+
+Yes, exactly — through a fixed lookup table, not a model decision:
+
+```python
+MATERIALS = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+MATERIAL_RECYCLABLE = [1, 1, 1, 1, 1, 0]
+```
+
+Every material (class) maps to recyclable (1) or non-recyclable (0): the first five classes are recyclable, only trash is non-recyclable.
+
+**Where each value comes from:**
+| Variable | Source | Represents |
+|---|---|---|
+| `yr` | the `recyclable` column in `manifest.csv` | **ground truth** (a manual label originally from `label_mapping.csv`) |
+| `pr` | derived from the model's predicted material (`pm`) via `MATERIAL_RECYCLABLE[pm]` | a **derived outcome**, not a direct model prediction |
+
+**`binary_acc=0.946`** = the fraction of test images where `yr` (truth) matched `pr` (derived outcome) — 94.6% of test images got the correct final recyclability outcome. **But this number can be misleading** if the data itself is skewed — in TrashNet, 94.6% of images are recyclable to begin with, so a trivial "always say recyclable" model would hit the same number without learning anything.
+
+**`non_rec_recall=0.733`** = of all images whose ground truth is **actually non-recyclable**, the model correctly caught only **73.3%** of them (the remaining 26.7% were wrongly classified as recyclable). This is the more operationally important number, since it directly measures "does the model catch the dangerous cases that could contaminate a recycling batch?" — and it's noticeably weaker than the overall accuracy, which is exactly why `methodology.md` treats it as a primary metric rather than relying on accuracy alone.
+
+**Bottom line:** the model never predicts recyclability directly — it predicts material, and the final decision is derived through a fixed, fully measurable and explainable rule.
