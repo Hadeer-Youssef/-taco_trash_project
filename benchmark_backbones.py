@@ -63,6 +63,20 @@ def setup_logging(log_file=None):
     return logger
 
 
+def format_duration(seconds):
+    """Renders a duration in seconds as e.g. '1h 12m 04s' (omitting leading
+    zero units), so long training runs read as hours/minutes instead of a
+    raw, hard-to-parse second count."""
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
 # ----------------------------------------------------------------------------
 # GPU utilization sampling (background thread, nvidia-smi via pynvml if present)
 # ----------------------------------------------------------------------------
@@ -296,18 +310,28 @@ def quick_eval_acc_loss(model, loader, device, is_inception, ce):
 
 
 def train_model(model, loader, device, epochs, is_inception, class_weight=None,
-                 val_loader=None, patience=None):
+                 val_loader=None, patience=None, lr_schedule="cosine", lr=3e-4):
     """Trains up to `epochs`. If val_loader and patience are both given, tracks
     the best epoch by validation loss, restores those weights at the end, and
     stops early once `patience` epochs pass with no improvement.
     Also times the whole run and samples GPU utilization throughout, both
-    reported in the returned history under train_time_sec / gpu_util_avg_pct."""
+    reported in the returned history under train_time_sec / gpu_util_avg_pct.
+
+    lr_schedule="cosine" (default) decays lr from `lr` to ~0 over `epochs`
+    via CosineAnnealingLR, stepped once per epoch. A flat lr for the whole
+    run tends to keep bouncing val_loss around its minimum late in training
+    (visible as val_loss oscillating rather than settling) instead of
+    settling into it; decaying lr fixes that without any architecture
+    change. Pass lr_schedule="none" to restore the old flat-lr behavior."""
+    assert lr_schedule in ("cosine", "none")
     model.to(device).train()
     ce = nn.CrossEntropyLoss(weight=class_weight)
     params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=3e-4, weight_decay=1e-4)
+    opt = torch.optim.AdamW(params, lr=lr, weight_decay=1e-4)
+    scheduler = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+                 if lr_schedule == "cosine" else None)
     history = {"train_loss": [], "train_acc": [], "train_f1": [],
-               "val_loss": [], "val_acc": [], "val_f1": []}
+               "val_loss": [], "val_acc": [], "val_f1": [], "lr": []}
 
     best_val_loss = float("inf")
     best_epoch = -1
@@ -334,10 +358,14 @@ def train_model(model, loader, device, epochs, is_inception, class_weight=None,
             train_loss = tot_loss / n
             train_acc = accuracy_score(y_true, y_pred)
             train_f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
+            cur_lr = opt.param_groups[0]["lr"]
             history["train_loss"].append(train_loss)
             history["train_acc"].append(train_acc)
             history["train_f1"].append(train_f1)
-            msg = (f"Epoch [{e+1}/{epochs}]\n"
+            history["lr"].append(cur_lr)
+            if scheduler is not None:
+                scheduler.step()
+            msg = (f"Epoch [{e+1}/{epochs}]  lr={cur_lr:.2e}\n"
                    f"  Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f}, F1: {train_f1:.4f}")
 
             if val_loader is not None:
@@ -366,7 +394,7 @@ def train_model(model, loader, device, epochs, is_inception, class_weight=None,
     gpu_stats = gpu_sampler.summary()
     history["train_time_sec"] = train_time_sec
     history.update(gpu_stats)
-    logger.info(f"  training time: {train_time_sec:.1f}s"
+    logger.info(f"  training time: {format_duration(train_time_sec)}"
                 + (f"  gpu_util avg/max: {gpu_stats['gpu_util_avg_pct']:.0f}%/"
                    f"{gpu_stats['gpu_util_max_pct']:.0f}%"
                    if gpu_stats["gpu_util_avg_pct"] is not None else "  gpu_util: n/a"))
@@ -588,6 +616,21 @@ def class_weights_from(rows, device):
     return torch.tensor(w, dtype=torch.float32, device=device)
 
 
+def run_tag(protocol, aug_mode, finetune_head, class_weighted, lr_schedule):
+    """Builds a unique, self-describing folder name from the parameters that
+    actually change a run's outcome, so every distinct configuration gets
+    its own folder automatically instead of overwriting the previous run's
+    report/checkpoint/results under a fixed filename."""
+    parts = [protocol, f"aug-{aug_mode}"]
+    if finetune_head:
+        parts.append("ft")
+    if class_weighted:
+        parts.append("cw")
+    if lr_schedule != "cosine":
+        parts.append(f"lr-{lr_schedule}")
+    return "_".join(parts)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", default="manifest.csv")
@@ -601,6 +644,12 @@ def main():
                     help="early-stop if val_loss doesn't improve for this many epochs; "
                          "also enables restoring the best-val-loss epoch's weights. "
                          "Pair with a large --epochs to let it find the best stopping point.")
+    ap.add_argument("--lr", type=float, default=3e-4, help="initial/peak learning rate")
+    ap.add_argument("--lr_schedule", choices=["cosine", "none"], default="cosine",
+                    help="'cosine' (default) decays --lr to ~0 over --epochs via "
+                         "CosineAnnealingLR, stepped once per epoch -- fixes val_loss "
+                         "oscillating around its minimum late in training instead of "
+                         "settling into it. 'none' keeps the old flat-lr behavior.")
     ap.add_argument("--finetune_head", action="store_true",
                     help="all backbones: richer 2-layer MLP head (ReLU+dropout) plus "
                          "unfreezing the last backbone stage, instead of a fully-frozen "
@@ -616,24 +665,44 @@ def main():
     ap.add_argument("--no_domain_randomize", action="store_true",
                     help="deprecated alias for --aug_mode off")
     ap.add_argument("--class_weighted", action="store_true")
-    ap.add_argument("--out", default=None)
-    ap.add_argument("--report_dir", default="reports",
-                    help="where per-model PNG reports (loss/acc curves, "
-                         "classification report, confusion matrix, ROC, samples) are saved")
+    ap.add_argument("--runs_dir", default="runs",
+                    help="root folder for auto-organized run output. Each backbone gets "
+                         "<runs_dir>/<backbone>/<param_tag>/ containing report.png, "
+                         "checkpoint.pt, results.json and run.log, where param_tag is "
+                         "built from protocol+aug_mode+finetune_head+class_weighted+"
+                         "lr_schedule -- so every distinct configuration is automatically "
+                         "kept separate instead of overwriting a fixed filename. "
+                         "--out/--report_dir/--ckpt_dir/--log_file below override this "
+                         "auto-layout if you need the old fixed-path behavior.")
+    ap.add_argument("--out", default=None,
+                    help="override: exact path for the results JSON (default: auto, under --runs_dir)")
+    ap.add_argument("--report_dir", default=None,
+                    help="override: exact folder for the report PNG (default: auto, under --runs_dir)")
     ap.add_argument("--no_report", action="store_true",
                     help="skip generating the per-model PNG report")
     ap.add_argument("--log_file", default=None,
-                    help="also write the run log to this file (default: "
-                         "<out-without-.json>.log next to the results JSON)")
-    ap.add_argument("--ckpt_dir", default="checkpoints",
-                    help="where each backbone's best-epoch weights are saved "
-                         "(as <protocol>_<backbone>.pt), for later use with predict.py")
+                    help="override: exact path for the run log (default: auto, under --runs_dir)")
+    ap.add_argument("--ckpt_dir", default=None,
+                    help="override: exact folder for checkpoints (default: auto, under --runs_dir)")
     ap.add_argument("--no_ckpt", action="store_true",
                     help="skip saving model checkpoints")
     args = ap.parse_args()
 
-    out = args.out or f"results_{args.protocol}.json"
-    log_file = args.log_file or (os.path.splitext(out)[0] + ".log")
+    if args.no_domain_randomize:
+        aug_mode = "off"
+    elif args.aug_mode == "auto":
+        aug_mode = "mild" if args.protocol == "in_domain" else "strong"
+    else:
+        aug_mode = args.aug_mode
+    tag = run_tag(args.protocol, aug_mode, args.finetune_head, args.class_weighted, args.lr_schedule)
+
+    # per-backbone paths are resolved inside the loop (each backbone's folder
+    # name includes its own name); these are the shared, single-command-wide
+    # results/log paths, which still support an explicit --out/--log_file
+    # override for anyone who wants the old fixed-path behavior.
+    out = args.out or os.path.join(args.runs_dir, "_summaries", f"{tag}.json")
+    log_file = args.log_file or os.path.join(args.runs_dir, "_summaries", f"{tag}.log")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
     setup_logging(log_file)
 
     torch.manual_seed(42); random.seed(42); np.random.seed(42)
@@ -642,12 +711,6 @@ def main():
     train_rows, test_rows = select_rows(df, args.protocol)
     n_train, n_val = len(train_rows), len(test_rows)
 
-    if args.no_domain_randomize:
-        aug_mode = "off"
-    elif args.aug_mode == "auto":
-        aug_mode = "mild" if args.protocol == "in_domain" else "strong"
-    else:
-        aug_mode = args.aug_mode
     effective_views = n_train * args.epochs
     logger.info(f"protocol={args.protocol}  device={device}  aug_mode={aug_mode}"
                 + ("  (auto-selected)" if args.aug_mode == "auto" and not args.no_domain_randomize else ""))
@@ -670,7 +733,8 @@ def main():
                         args.bs, num_workers=2)
         cw = class_weights_from(train_rows, device) if args.class_weighted else None
         model, history = train_model(model, tr, device, args.epochs, is_inc,
-                                      class_weight=cw, val_loader=te, patience=args.patience)
+                                      class_weight=cw, val_loader=te, patience=args.patience,
+                                      lr_schedule=args.lr_schedule, lr=args.lr)
         m = eval_model(model, te, device, is_inc)
         logger.info(f"  material_acc={m['material_acc']:.3f} macroF1={m['material_macro_f1']:.3f} "
                     f"recyclability_acc={m['recyclability_acc']:.3f} non_recyclable_recall={m['non_recyclable_recall']:.3f}")
@@ -686,19 +750,24 @@ def main():
         lat = m["inference_latency_ms_per_image"]
         thr = m["inference_throughput_images_per_sec"]
         gpu_i = m["inference_gpu_util_avg_pct"]
-        logger.info(f"  train_time={history['train_time_sec']:.1f}s"
+        logger.info(f"  train_time={format_duration(history['train_time_sec'])}"
                     + (f"  train_gpu_util_avg={history['gpu_util_avg_pct']:.0f}%"
                        if history.get("gpu_util_avg_pct") is not None else "")
                     + (f"  inference_latency={lat:.2f}ms/img  throughput={thr:.1f} img/s"
                        if lat is not None else "")
                     + (f"  inference_gpu_util_avg={gpu_i:.0f}%" if gpu_i is not None else ""))
 
+        run_dir = os.path.join(args.runs_dir, name, tag)
+        report_dir = args.report_dir or run_dir
+        ckpt_dir = args.ckpt_dir or run_dir
+        logger.info(f"  run folder: {run_dir}")
+
         if not args.no_report:
-            plot_model_report(name, history, m, out_dir=args.report_dir)
+            plot_model_report(name, history, m, out_dir=report_dir)
 
         if not args.no_ckpt:
-            os.makedirs(args.ckpt_dir, exist_ok=True)
-            ckpt_path = os.path.join(args.ckpt_dir, f"{args.protocol}_{name}.pt")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            ckpt_path = os.path.join(ckpt_dir, "checkpoint.pt")
             torch.save({
                 "backbone": name,
                 "finetune_head": args.finetune_head,
@@ -708,6 +777,8 @@ def main():
                 "protocol": args.protocol,
                 "aug_mode": aug_mode,
                 "class_weighted": args.class_weighted,
+                "lr": args.lr,
+                "lr_schedule": args.lr_schedule,
                 "material_acc": m["material_acc"],
                 "recyclability_acc": m["recyclability_acc"],
                 "non_recyclable_recall": m["non_recyclable_recall"],
@@ -722,6 +793,15 @@ def main():
         m_json = {k: v for k, v in m.items() if k not in ("y_true", "y_probs", "samples")}
         m_json["history"] = history
         results[name] = m_json
+
+        # per-backbone results.json alongside its report/checkpoint, so
+        # everything for this exact run lives in one self-contained folder
+        os.makedirs(run_dir, exist_ok=True)
+        json.dump({"backbone": name, "protocol": args.protocol, "epochs": args.epochs,
+                   "aug_mode": aug_mode, "finetune_head": args.finetune_head,
+                   "class_weighted": args.class_weighted, "lr": args.lr,
+                   "lr_schedule": args.lr_schedule, "results": m_json},
+                  open(os.path.join(run_dir, "results.json"), "w"), indent=2)
 
     json.dump({"protocol": args.protocol, "epochs": args.epochs,
                "aug_mode": aug_mode,
