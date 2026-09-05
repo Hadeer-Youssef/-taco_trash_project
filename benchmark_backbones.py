@@ -121,23 +121,38 @@ class GpuUtilSampler:
 # Dataset driven by the frozen manifest
 # ----------------------------------------------------------------------------
 class ManifestDataset(Dataset):
-    """domain_randomize=True applies on-the-fly variation each epoch (color
-    jitter, grayscale, blur, rotation, vertical flip, translation/shear) —
-    the same variety a notebook's offline "save N augmented copies to disk"
+    """aug_mode controls how much on-the-fly variation is applied to TRAIN
+    samples each epoch (val/test are always plain resize+normalize, no aug):
+
+      "off"    : RandomResizedCrop + RandomHorizontalFlip only (baseline)
+      "mild"   : "off" + small rotation/vertical-flip/shift — safe geometric
+                 variety that shouldn't hurt when train/test are the same
+                 domain (in_domain), since it doesn't distort color/texture,
+                 the cues that differ between clean/wild domains.
+      "strong" : "mild" + color jitter, grayscale, blur — the full
+                 domain-randomizing set meant to fight the clean/wild
+                 domain gap (cross_domain, joint). This is more aggressive
+                 and can cost a bit of accuracy when there's no actual
+                 domain shift to fight (i.e. on in_domain), since it makes
+                 the task harder without a generalization payoff there.
+
+    This mirrors what a notebook's offline "save N augmented copies to disk"
     pipeline gives you, but generated fresh per sample per epoch instead of
     duplicating files, so it never repeats the exact same augmented image."""
 
-    def __init__(self, rows, input_size=224, train=True, domain_randomize=True):
+    def __init__(self, rows, input_size=224, train=True, aug_mode="strong"):
+        assert aug_mode in ("off", "mild", "strong")
         self.rows = rows
         norm = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         if train:
             aug = [transforms.RandomResizedCrop(input_size, scale=(0.6, 1.0)),
                    transforms.RandomHorizontalFlip()]
-            if domain_randomize:
+            if aug_mode in ("mild", "strong"):
                 aug += [transforms.RandomVerticalFlip(0.2),
                         transforms.RandomRotation(30),
-                        transforms.RandomAffine(0, translate=(0.15, 0.15), shear=10),
-                        transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
+                        transforms.RandomAffine(0, translate=(0.15, 0.15), shear=10)]
+            if aug_mode == "strong":
+                aug += [transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
                         transforms.RandomGrayscale(0.1),
                         transforms.GaussianBlur(3, sigma=(0.1, 2.0))]
             self.tf = transforms.Compose([transforms.Resize((int(input_size * 1.15),) * 2),
@@ -366,13 +381,24 @@ def train_model(model, loader, device, epochs, is_inception, class_weight=None,
 
 
 @torch.no_grad()
-def eval_model(model, loader, device, is_inception, n_samples=12, warmup_batches=2):
+def eval_model(model, loader, device, is_inception, n_samples=12, warmup_batches=2,
+                samples_per_class=2):
     """Also measures inference latency/throughput on `device`: the first
     `warmup_batches` are excluded from timing (cudnn autotune / lazy init),
     each remaining batch is timed with a cuda synchronize so GPU latency is
-    measured accurately rather than just kernel-launch time."""
+    measured accurately rather than just kernel-launch time.
+
+    Sample-grid collection: manifest.csv is grouped in contiguous blocks by
+    (domain, material) rather than shuffled, and the eval loader has no
+    shuffle=True (order doesn't matter for metrics) -- so simply taking the
+    first N images seen would show only whichever class happens to sit first
+    in the file, not a representative mix. Instead this keeps up to
+    `samples_per_class` per material class across the whole pass, then
+    flattens/truncates to n_samples at the end so the report grid actually
+    spans classes (and both recyclable/non-recyclable) rather than just one."""
     model.to(device).eval()
-    ym, pm, yr, probs_all, sample_imgs = [], [], [], [], []
+    ym, pm, yr, probs_all = [], [], [], []
+    per_class_samples = {c: [] for c in range(len(MATERIALS))}
     batch_times, n_timed_images = [], 0
     gpu_sampler = GpuUtilSampler()
     with gpu_sampler:
@@ -393,13 +419,15 @@ def eval_model(model, loader, device, is_inception, n_samples=12, warmup_batches
             pred = probs.argmax(1)
             pm += pred.tolist(); ym += y.tolist(); yr += rec.tolist()
             probs_all.append(probs)
-            if len(sample_imgs) < n_samples:
-                take = min(n_samples - len(sample_imgs), x.size(0))
-                for i in range(take):
-                    sample_imgs.append((x[i].cpu(), int(y[i]), int(pred[i])))
+            for i in range(x.size(0)):
+                y_i = int(y[i])
+                if len(per_class_samples[y_i]) < samples_per_class:
+                    per_class_samples[y_i].append((x[i].cpu(), y_i, int(pred[i]), int(rec[i])))
     probs_all = torch.cat(probs_all).numpy()
     # recyclability via material rule (deterministic) and reported alongside material
     pr = [MATERIAL_RECYCLABLE[i] for i in pm]
+
+    sample_imgs = [s for class_samples in per_class_samples.values() for s in class_samples][:n_samples]
 
     total_time = sum(batch_times)
     latency_ms_per_image = (total_time / n_timed_images * 1000) if n_timed_images else None
@@ -490,16 +518,24 @@ def plot_model_report(name, history, eval_out, out_dir="reports"):
 
     ax = fig.add_subplot(gs[2, 1])
     ax.axis("off")
-    n_show = min(8, len(eval_out["samples"]))
+    ax.text(0.5, 1.0, "Sample predictions (spread across all classes)",
+            fontsize=9, ha="center", va="bottom", transform=ax.transAxes)
+    n_show = min(12, len(eval_out["samples"]))
     if n_show:
-        inner = gs[2, 1].subgridspec(2, 4)
+        # height_ratios gives the title row breathing room above the 3x4 image grid
+        inner = gs[2, 1].subgridspec(4, 4, height_ratios=[0.15, 1, 1, 1])
+        rec_label = {1: "recyclable", 0: "non-recyclable"}
+        # NOTE: recyclability here is the dataset's manual ground-truth label
+        # (from label_mapping.csv's item-aware policy), not a model output --
+        # the model only predicts material.
         for k in range(n_show):
-            img_t, y_i, p_i = eval_out["samples"][k]
-            a = fig.add_subplot(inner[k // 4, k % 4])
+            img_t, y_i, p_i, rec_i = eval_out["samples"][k]
+            a = fig.add_subplot(inner[1 + k // 4, k % 4])
             a.imshow(_denorm(img_t))
             correct = y_i == p_i
-            a.set_title(f"true:{MATERIALS[y_i]}\npred:{MATERIALS[p_i]}",
-                        fontsize=7, color="black" if correct else "red")
+            a.set_title(f"true:{MATERIALS[y_i]} ({rec_label[rec_i]})\n"
+                        f"pred:{MATERIALS[p_i]}",
+                        fontsize=6, color="black" if correct else "red")
             a.axis("off")
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
@@ -553,7 +589,15 @@ def main():
                          "unfreezing the last backbone stage, instead of a fully-frozen "
                          "backbone + single linear head (see build_backbone docstring "
                          "for the per-architecture unfreeze target)")
-    ap.add_argument("--no_domain_randomize", action="store_true")
+    ap.add_argument("--aug_mode", choices=["auto", "off", "mild", "strong"], default="auto",
+                    help="training augmentation strength (val/test are never augmented). "
+                         "'auto' (default) picks 'mild' for in_domain (no domain shift to "
+                         "fight, so avoid the accuracy cost of aggressive color/blur aug) "
+                         "and 'strong' for cross_domain/joint (fights the clean/wild domain "
+                         "gap). 'off'/'mild'/'strong' force that mode regardless of protocol. "
+                         "See ManifestDataset docstring for exactly what each mode applies.")
+    ap.add_argument("--no_domain_randomize", action="store_true",
+                    help="deprecated alias for --aug_mode off")
     ap.add_argument("--class_weighted", action="store_true")
     ap.add_argument("--out", default=None)
     ap.add_argument("--report_dir", default="reports",
@@ -575,24 +619,30 @@ def main():
     df = pd.read_csv(args.manifest)
     train_rows, test_rows = select_rows(df, args.protocol)
     n_train, n_val = len(train_rows), len(test_rows)
-    aug_on = not args.no_domain_randomize
+
+    if args.no_domain_randomize:
+        aug_mode = "off"
+    elif args.aug_mode == "auto":
+        aug_mode = "mild" if args.protocol == "in_domain" else "strong"
+    else:
+        aug_mode = args.aug_mode
     effective_views = n_train * args.epochs
-    logger.info(f"protocol={args.protocol}  device={device}")
-    logger.info(f"  train samples: {n_train}  (augmentation: {'ON' if aug_on else 'off'}, "
+    logger.info(f"protocol={args.protocol}  device={device}  aug_mode={aug_mode}"
+                + ("  (auto-selected)" if args.aug_mode == "auto" and not args.no_domain_randomize else ""))
+    logger.info(f"  train samples: {n_train}  (augmentation: {aug_mode}, "
                 f"applied on-the-fly each epoch -- sample COUNT does not change)")
     logger.info(f"  val/test samples: {n_val}  (never augmented)")
     logger.info(f"  effective training views over {args.epochs} epochs: "
                 f"{n_train} x {args.epochs} = {effective_views}"
                 + ("  (each view is a differently-augmented version of its source image)"
-                   if aug_on else "  (same image repeated identically each epoch, no augmentation)"))
+                   if aug_mode != "off" else "  (same image repeated identically each epoch, no augmentation)"))
 
     results = {}
     for name in args.backbones:
         logger.info(f"\n=== {name} ===")
         model, input_size = build_backbone(name, finetune_head=args.finetune_head)
         is_inc = name.lower() == "inception_v3"
-        tr = DataLoader(ManifestDataset(train_rows, input_size, True,
-                                        not args.no_domain_randomize),
+        tr = DataLoader(ManifestDataset(train_rows, input_size, True, aug_mode),
                         args.bs, shuffle=True, num_workers=2)
         te = DataLoader(ManifestDataset(test_rows, input_size, False),
                         args.bs, num_workers=2)
@@ -621,7 +671,7 @@ def main():
         results[name] = m_json
 
     json.dump({"protocol": args.protocol, "epochs": args.epochs,
-               "domain_randomize": not args.no_domain_randomize,
+               "aug_mode": aug_mode,
                "class_weighted": args.class_weighted, "results": results},
               open(out, "w"), indent=2)
     logger.info(f"\nwrote {out}")
