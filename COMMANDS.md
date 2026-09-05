@@ -12,7 +12,7 @@ and you never have to invent `--out`/`--report_dir`/`--ckpt_dir` names by
 hand:
 
 ```
-runs/<backbone>/<protocol>_aug-<mode>[_ft][_cw][_lr-none]/
+runs/<backbone>/<protocol>_aug-<mode>[_ft][_cw][_lr-none][_lr<value>][_bs<value>]/
     report_<backbone>.png   # 5-panel visual report
     checkpoint.pt           # best-epoch weights + metadata (predict.py-ready)
     results.json            # this backbone's metrics for this exact config
@@ -20,11 +20,18 @@ runs/_summaries/<tag>.json  # combined metrics for every backbone in this comman
 runs/_summaries/<tag>.log   # full console log for this command
 ```
 
-The tag suffixes: `ft` = `--finetune_head` was on, `cw` = `--class_weighted`
-was on, `lr-none` = `--lr_schedule none` (cosine decay is the default and
-omitted from the tag). E.g. `--protocol cross_domain --backbones resnet50
---finetune_head --class_weighted` writes to
-`runs/resnet50/cross_domain_aug-strong_ft_cw/`.
+The tag suffixes, each added only when it differs from the default:
+- `ft` — `--finetune_head` was on
+- `cw` — `--class_weighted` was on
+- `lr-none` — `--lr_schedule none` (cosine decay is the default and omitted from the tag)
+- `lr<value>` — `--lr` differs from the default `3e-4`, e.g. `--lr 1e-4` → `_lr1e-4`
+- `bs<value>` — `--bs` differs from the default `32`, e.g. `--bs 16` → `_bs16`
+
+E.g. `--protocol cross_domain --backbones resnet50 --finetune_head --class_weighted`
+writes to `runs/resnet50/cross_domain_aug-strong_ft_cw/`.
+
+E.g. `--protocol in_domain --backbones resnet50 --lr 1e-4 --lr_schedule none --bs 16`
+writes to `runs/resnet50/in_domain_aug-mild_lr-none_lr1e-4_bs16/`.
 
 Only pass `--out` / `--report_dir` / `--ckpt_dir` / `--log_file` if you
 specifically want to override this auto-layout with a fixed path.
@@ -144,7 +151,7 @@ not surprising, outcome when train and test share one domain.
 
 ---
 
-## 5. WITH vs WITHOUT early stopping (`--patience`) + the new LR scheduler
+## 5. WITH vs WITHOUT early stopping (`--patience`) + the LR scheduler
 
 ```bash
 # WITHOUT patience: fixed epoch count (whatever epoch it ends on is final)
@@ -156,16 +163,39 @@ python benchmark_backbones.py --protocol cross_domain --backbones resnet50 --epo
 # same, but with the OLD flat learning rate (no decay) for comparison
 python benchmark_backbones.py --protocol cross_domain --backbones resnet50 --epochs 100 --patience 5 --lr_schedule none
 ```
-**Output:** `runs/resnet50/cross_domain_aug-strong/` (15-epoch baseline),
-`runs/resnet50/cross_domain_aug-strong/` gets overwritten by the 100-epoch
-run since they share a tag — **use `--aug_mode` or add a manual `--out`
-suffix if you want to keep both**; the `_lr-none` suffix already keeps the
-flat-LR variant separate: `runs/resnet50/cross_domain_aug-strong_lr-none/`.
+**Output:** `--epochs` isn't part of the folder tag (only the config that
+changes the *outcome* is), so the 15-epoch and 100-epoch runs above both
+target `runs/resnet50/cross_domain_aug-strong/` and the second **overwrites**
+the first — pass a distinct `--out`/`--ckpt_dir`/`--report_dir` if you need
+to keep both. The flat-LR variant is automatically kept separate though,
+at `runs/resnet50/cross_domain_aug-strong_lr-none/`.
 
 Compare: check `results.json`'s `history.best_epoch` / `history.best_val_loss`
 against the fixed-epoch run's final-epoch numbers, and check the per-epoch
 `lr=` value printed in the log to confirm cosine decay is active (it should
 shrink smoothly from `--lr`, default 3e-4, toward ~0 by the final epoch).
+
+---
+
+## 5b. Custom `--lr` / `--bs` sweep (e.g. lower LR, no decay, smaller batch)
+
+```bash
+python benchmark_backbones.py --protocol cross_domain --backbones resnet50 --epochs 15 \
+    --lr 1e-4 --lr_schedule none --bs 16
+```
+**Output:** `runs/resnet50/cross_domain_aug-strong_lr-none_lr1e-4_bs16/` —
+`--lr` and `--bs` only appear in the folder name when they differ from the
+defaults (`3e-4`, `32`), so this is automatically kept separate from the
+default-LR/BS runs above without any manual naming.
+
+To compare several lr/bs combinations, just vary the flags — each
+combination gets its own folder automatically:
+```bash
+python benchmark_backbones.py --protocol cross_domain --backbones resnet50 --epochs 15 --lr 1e-4 --bs 16
+python benchmark_backbones.py --protocol cross_domain --backbones resnet50 --epochs 15 --lr 1e-4 --bs 64
+python benchmark_backbones.py --protocol cross_domain --backbones resnet50 --epochs 15 --lr 5e-5 --bs 16
+```
+lands at `..._lr1e-4_bs16/`, `..._lr1e-4_bs64/`, `..._lr5e-5_bs16/` respectively.
 
 ---
 
@@ -289,8 +319,12 @@ outside the manifest, not for eyeballing test-set examples.
 
 ## Naming convention (automatic — nothing to remember)
 
-`runs/<backbone>/<protocol>_aug-<mode>[_ft][_cw][_lr-none]/` — every distinct
-configuration is kept separate automatically. If you need a manual override
-for any single run (e.g. to preserve two runs that would otherwise share a
-tag, like the epochs=15-vs-100 case in section 5), pass an explicit
-`--out`/`--report_dir`/`--ckpt_dir`/`--log_file`.
+`runs/<backbone>/<protocol>_aug-<mode>[_ft][_cw][_lr-none][_lr<value>][_bs<value>]/`
+— every distinct configuration of `protocol`, `aug_mode`, `finetune_head`,
+`class_weighted`, `lr_schedule`, `lr`, and `bs` is kept separate
+automatically. `--epochs` and `--patience` are NOT part of the tag (they
+don't change what the model learns to the same degree, and vary too often
+to be worth a folder split) — so two runs differing only in `--epochs`
+target the same folder and the later one overwrites the earlier. If you
+need to preserve both (like the epochs=15-vs-100 case in section 5), pass
+an explicit `--out`/`--report_dir`/`--ckpt_dir`/`--log_file`.

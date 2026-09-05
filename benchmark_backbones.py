@@ -616,11 +616,14 @@ def class_weights_from(rows, device):
     return torch.tensor(w, dtype=torch.float32, device=device)
 
 
-def run_tag(protocol, aug_mode, finetune_head, class_weighted, lr_schedule):
+def run_tag(protocol, aug_mode, finetune_head, class_weighted, lr_schedule,
+            lr=3e-4, bs=32):
     """Builds a unique, self-describing folder name from the parameters that
     actually change a run's outcome, so every distinct configuration gets
     its own folder automatically instead of overwriting the previous run's
-    report/checkpoint/results under a fixed filename."""
+    report/checkpoint/results under a fixed filename. lr/bs only appear in
+    the tag when they differ from the defaults, so ordinary runs keep their
+    short, familiar names."""
     parts = [protocol, f"aug-{aug_mode}"]
     if finetune_head:
         parts.append("ft")
@@ -628,6 +631,10 @@ def run_tag(protocol, aug_mode, finetune_head, class_weighted, lr_schedule):
         parts.append("cw")
     if lr_schedule != "cosine":
         parts.append(f"lr-{lr_schedule}")
+    if lr != 3e-4:
+        parts.append(f"lr{lr:.0e}".replace("e-0", "e-").replace("e+0", "e"))
+    if bs != 32:
+        parts.append(f"bs{bs}")
     return "_".join(parts)
 
 
@@ -694,7 +701,8 @@ def main():
         aug_mode = "mild" if args.protocol == "in_domain" else "strong"
     else:
         aug_mode = args.aug_mode
-    tag = run_tag(args.protocol, aug_mode, args.finetune_head, args.class_weighted, args.lr_schedule)
+    tag = run_tag(args.protocol, aug_mode, args.finetune_head, args.class_weighted, args.lr_schedule,
+                  lr=args.lr, bs=args.bs)
 
     # per-backbone paths are resolved inside the loop (each backbone's folder
     # name includes its own name); these are the shared, single-command-wide
