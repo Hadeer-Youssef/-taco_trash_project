@@ -121,6 +121,12 @@ class GpuUtilSampler:
 # Dataset driven by the frozen manifest
 # ----------------------------------------------------------------------------
 class ManifestDataset(Dataset):
+    """domain_randomize=True applies on-the-fly variation each epoch (color
+    jitter, grayscale, blur, rotation, vertical flip, translation/shear) —
+    the same variety a notebook's offline "save N augmented copies to disk"
+    pipeline gives you, but generated fresh per sample per epoch instead of
+    duplicating files, so it never repeats the exact same augmented image."""
+
     def __init__(self, rows, input_size=224, train=True, domain_randomize=True):
         self.rows = rows
         norm = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -128,7 +134,10 @@ class ManifestDataset(Dataset):
             aug = [transforms.RandomResizedCrop(input_size, scale=(0.6, 1.0)),
                    transforms.RandomHorizontalFlip()]
             if domain_randomize:
-                aug += [transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
+                aug += [transforms.RandomVerticalFlip(0.2),
+                        transforms.RandomRotation(30),
+                        transforms.RandomAffine(0, translate=(0.15, 0.15), shear=10),
+                        transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
                         transforms.RandomGrayscale(0.1),
                         transforms.GaussianBlur(3, sigma=(0.1, 2.0))]
             self.tf = transforms.Compose([transforms.Resize((int(input_size * 1.15),) * 2),
@@ -516,9 +525,13 @@ def select_rows(df, protocol):
 
 
 def class_weights_from(rows, device):
-    counts = np.bincount([r["material"] for r in rows], minlength=6).astype(float)
+    raw_counts = np.bincount([r["material"] for r in rows], minlength=6).astype(float)
+    counts = raw_counts.copy()
     counts[counts == 0] = 1.0
     w = counts.sum() / (6 * counts)
+    logger.info("  class weights (from %d training rows):", len(rows))
+    for mat, c, wi in zip(MATERIALS, raw_counts, w):
+        logger.info(f"    {mat:<10s} n={int(c):5d}  weight={wi:.4f}")
     return torch.tensor(w, dtype=torch.float32, device=device)
 
 
@@ -561,7 +574,17 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     df = pd.read_csv(args.manifest)
     train_rows, test_rows = select_rows(df, args.protocol)
-    logger.info(f"protocol={args.protocol}  train={len(train_rows)}  test={len(test_rows)}  device={device}")
+    n_train, n_val = len(train_rows), len(test_rows)
+    aug_on = not args.no_domain_randomize
+    effective_views = n_train * args.epochs
+    logger.info(f"protocol={args.protocol}  device={device}")
+    logger.info(f"  train samples: {n_train}  (augmentation: {'ON' if aug_on else 'off'}, "
+                f"applied on-the-fly each epoch -- sample COUNT does not change)")
+    logger.info(f"  val/test samples: {n_val}  (never augmented)")
+    logger.info(f"  effective training views over {args.epochs} epochs: "
+                f"{n_train} x {args.epochs} = {effective_views}"
+                + ("  (each view is a differently-augmented version of its source image)"
+                   if aug_on else "  (same image repeated identically each epoch, no augmentation)"))
 
     results = {}
     for name in args.backbones:
