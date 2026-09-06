@@ -348,11 +348,16 @@ def attach_ecoc_head(model, name, n_classes=6):
     existing final layer is always trainable regardless of freeze_features."""
     attr = _FINAL_LAYER_ATTR[name.lower()]
     old_head = getattr(model, attr)
-    # both nn.Linear and the _mlp_head Sequential end in a Linear(-> n_classes);
-    # find its in_features to size the new head identically.
-    last_linear = old_head if isinstance(old_head, nn.Linear) else \
-        [m for m in old_head.modules() if isinstance(m, nn.Linear)][-1]
-    in_features = last_linear.in_features
+    # The new EcocHead must accept the same input the OLD head accepted from
+    # the backbone -- that's the FIRST Linear's in_features (e.g. 2048 for
+    # resnet50), not the last Linear's in_features. A plain nn.Linear has
+    # only one, but the --finetune_head _mlp_head Sequential is
+    # Linear(in_feats, hidden) -> ReLU -> Dropout -> Linear(hidden, n_classes);
+    # taking the *last* Linear there would wrongly size EcocHead for `hidden`
+    # (e.g. 96) instead of the true backbone feature width (e.g. 2048).
+    first_linear = old_head if isinstance(old_head, nn.Linear) else \
+        [m for m in old_head.modules() if isinstance(m, nn.Linear)][0]
+    in_features = first_linear.in_features
     head = EcocHead(in_features, n_classes)
     setattr(model, attr, head)
     for p in head.parameters():
