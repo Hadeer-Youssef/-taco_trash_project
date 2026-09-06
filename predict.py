@@ -17,14 +17,20 @@ import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
 
-from benchmark_backbones import build_backbone, MATERIALS, MATERIAL_RECYCLABLE
+from benchmark_backbones import build_backbone, attach_ecoc_head, MATERIALS, MATERIAL_RECYCLABLE
 
 
 def load_checkpoint(ckpt_path, device):
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model, _ = build_backbone(ckpt["backbone"], finetune_head=ckpt["finetune_head"])
+    ecoc_head = None
+    if ckpt.get("ecoc_head"):
+        model = attach_ecoc_head(model, ckpt["backbone"])
+        from benchmark_backbones import _FINAL_LAYER_ATTR
+        ecoc_head = getattr(model, _FINAL_LAYER_ATTR[ckpt["backbone"].lower()])
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device).eval()
+    ckpt["_ecoc_head"] = ecoc_head
     return model, ckpt
 
 
@@ -43,8 +49,13 @@ def predict_image(model, ckpt, image_path, device):
     x = tf(img).unsqueeze(0).to(device)
     out = model(x)
     logits = out[0] if isinstance(out, tuple) else out
-    probs = F.softmax(logits, dim=1)[0].cpu()
-    pred_idx = int(probs.argmax())
+    ecoc_head = ckpt.get("_ecoc_head")
+    if ecoc_head is not None:
+        pred_t, probs_t = ecoc_head.decode(logits)
+        pred_idx, probs = int(pred_t[0]), probs_t[0].cpu()
+    else:
+        probs = F.softmax(logits, dim=1)[0].cpu()
+        pred_idx = int(probs.argmax())
     materials = ckpt["materials"]
     material_recyclable = ckpt["material_recyclable"]
     recyclable = bool(material_recyclable[pred_idx])

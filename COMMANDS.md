@@ -12,7 +12,7 @@ and you never have to invent `--out`/`--report_dir`/`--ckpt_dir` names by
 hand:
 
 ```
-runs/<backbone>/<protocol>_aug-<mode>[_ft][_cw][_lr-none][_lr<value>][_bs<value>]/
+runs/<backbone>/<protocol>_aug-<mode>[_ft][_cw][_ecoc][_lr-none][_lr<value>][_bs<value>]/
     report_<backbone>.png   # 5-panel visual report
     checkpoint.pt           # best-epoch weights + metadata (predict.py-ready)
     results.json            # this backbone's metrics for this exact config
@@ -23,6 +23,7 @@ runs/_summaries/<tag>.log   # full console log for this command
 The tag suffixes, each added only when it differs from the default:
 - `ft` — `--finetune_head` was on
 - `cw` — `--class_weighted` was on
+- `ecoc` — `--ecoc_head` was on
 - `lr-none` — `--lr_schedule none` (cosine decay is the default and omitted from the tag)
 - `lr<value>` — `--lr` differs from the default `3e-4`, e.g. `--lr 1e-4` → `_lr1e-4`
 - `bs<value>` — `--bs` differs from the default `32`, e.g. `--bs 16` → `_bs16`
@@ -32,6 +33,9 @@ writes to `runs/resnet50/cross_domain_aug-strong_ft_cw/`.
 
 E.g. `--protocol in_domain --backbones resnet50 --lr 1e-4 --lr_schedule none --bs 16`
 writes to `runs/resnet50/in_domain_aug-mild_lr-none_lr1e-4_bs16/`.
+
+E.g. `--protocol cross_domain --backbones resnet50 --ecoc_head`
+writes to `runs/resnet50/cross_domain_aug-strong_ecoc/`.
 
 Only pass `--out` / `--report_dir` / `--ckpt_dir` / `--log_file` if you
 specifically want to override this auto-layout with a fixed path.
@@ -122,6 +126,40 @@ Compare: `material_acc`, `material_macro_f1`, and `history.train_time_sec`
 (finetuning trains more parameters, so expect it to be slower per epoch —
 check whether the accuracy gain is worth the extra training time and
 `inference_latency_ms_per_image`).
+
+---
+
+## 3b. WITH vs WITHOUT `--ecoc_head` (softmax vs. Error-Correcting Output Codes)
+
+From Wang, Heliyon 2024 (e29966) — see `paper_household_garbage_ecoc_capsa.md`
+for the full paper summary. Swaps the softmax final layer for an ensemble of
+`n_classes-1 = 5` small binary ANN classifiers decoded via Hamming distance.
+The paper measured this as its largest ablated contribution (+3.68% material
+accuracy on TrashNet) but only tested it **in-domain** — this comparison
+extends the same ablation to `cross_domain`, which the paper never covered.
+
+```bash
+# in_domain, matching the paper's own evaluation setting
+python benchmark_backbones.py --protocol in_domain --backbones resnet50 --epochs 15
+python benchmark_backbones.py --protocol in_domain --backbones resnet50 --epochs 15 --ecoc_head
+
+# cross_domain — does the paper's reported gain survive a real domain shift?
+python benchmark_backbones.py --protocol cross_domain --backbones resnet50 --epochs 15
+python benchmark_backbones.py --protocol cross_domain --backbones resnet50 --epochs 15 --ecoc_head
+
+# composable with --finetune_head (ECOC replaces whichever final layer that produces)
+python benchmark_backbones.py --protocol cross_domain --backbones resnet50 --epochs 15 --finetune_head --ecoc_head
+```
+**Output:** `runs/resnet50/in_domain_aug-mild/` vs. `.../in_domain_aug-mild_ecoc/`;
+`runs/resnet50/cross_domain_aug-strong/` vs. `.../cross_domain_aug-strong_ecoc/`;
+`.../cross_domain_aug-strong_ft_ecoc/` for the combined run.
+
+Compare: `material_acc`/`material_macro_f1` for the in_domain pair should
+roughly echo the paper's own +3.68% gain if this reimplementation is
+faithful to their method. The interesting, previously-untested number is
+whether that gain holds, shrinks, or reverses on the cross_domain pair —
+report both either way, since a result that *doesn't* match the paper's
+in-domain finding is itself informative for your own paper's discussion.
 
 ---
 
@@ -234,11 +272,13 @@ name in place of `resnet50`. As a checklist per backbone:
 - [ ] `--class_weighted`
 - [ ] `--finetune_head`
 - [ ] `--finetune_head --class_weighted` (combined)
+- [ ] `--ecoc_head`
+- [ ] `--finetune_head --ecoc_head` (combined)
 - [ ] `--aug_mode off`
 - [ ] `--aug_mode strong` (should match baseline, since strong is cross_domain's auto default — run anyway to confirm)
 
 All of these land in distinct auto-named folders under `runs/<backbone>/` —
-no manual bookkeeping needed even for the full 6-way grid per backbone.
+no manual bookkeeping needed even for the full 8-way grid per backbone.
 
 ---
 
@@ -319,9 +359,9 @@ outside the manifest, not for eyeballing test-set examples.
 
 ## Naming convention (automatic — nothing to remember)
 
-`runs/<backbone>/<protocol>_aug-<mode>[_ft][_cw][_lr-none][_lr<value>][_bs<value>]/`
+`runs/<backbone>/<protocol>_aug-<mode>[_ft][_cw][_ecoc][_lr-none][_lr<value>][_bs<value>]/`
 — every distinct configuration of `protocol`, `aug_mode`, `finetune_head`,
-`class_weighted`, `lr_schedule`, `lr`, and `bs` is kept separate
+`class_weighted`, `ecoc_head`, `lr_schedule`, `lr`, and `bs` is kept separate
 automatically. `--epochs` and `--patience` are NOT part of the tag (they
 don't change what the model learns to the same degree, and vary too often
 to be worth a folder split) — so two runs differing only in `--epochs`

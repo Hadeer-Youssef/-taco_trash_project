@@ -196,6 +196,63 @@ def _mlp_head(in_features, hidden, n_classes, dropout):
     )
 
 
+# ----------------------------------------------------------------------------
+# ECOC classification head (ordinal encoding), from:
+#   Wang, "Application research of image classification algorithm based on
+#   deep learning in household garbage sorting", Heliyon 10 (2024) e29966.
+# The paper reports ECOC replacing softmax as its single largest ablated
+# contribution (+3.68% material accuracy on TrashNet, in-domain). Their CNN
+# was trained from scratch with an architecture searched by CapSA; here the
+# same ECOC *decoding* idea is applied on top of this project's existing
+# pretrained/fine-tuned backbones instead, so it's an apples-to-apples
+# swap-in replacement for the softmax head, not a from-scratch reimplementation.
+# ----------------------------------------------------------------------------
+def ecoc_codebook(n_classes):
+    """Ordinal ECOC codebook: L = n_classes - 1 binary classifiers, where
+    classifier j asks "is the true class's ordinal index > j?" Class c's code
+    row is 1 for the first c bits and 0 for the rest, e.g. for 6 classes:
+      class 0: 0 0 0 0 0      class 3: 1 1 1 0 0
+      class 1: 1 0 0 0 0      class 4: 1 1 1 1 0
+      class 2: 1 1 0 0 0      class 5: 1 1 1 1 1
+    Returns a (n_classes, L) float tensor."""
+    L = n_classes - 1
+    rows = []
+    for c in range(n_classes):
+        rows.append([1.0 if j < c else 0.0 for j in range(L)])
+    return torch.tensor(rows, dtype=torch.float32)
+
+
+class EcocHead(nn.Module):
+    """L = n_classes - 1 small binary ANN classifiers (one hidden layer, 10
+    units, tanh activation -- matching the paper's per-classifier structure),
+    each producing one logit. forward() returns the raw (B, L) logits for BCE
+    training; decode() turns those into a predicted class index (and a
+    per-class "probability" for reporting/ROC purposes) by nearest-code match."""
+
+    def __init__(self, in_features, n_classes, hidden=10):
+        super().__init__()
+        self.n_classes = n_classes
+        self.classifiers = nn.ModuleList([
+            nn.Sequential(nn.Linear(in_features, hidden), nn.Tanh(), nn.Linear(hidden, 1))
+            for _ in range(n_classes - 1)
+        ])
+        self.register_buffer("codebook", ecoc_codebook(n_classes))
+
+    def forward(self, x):
+        return torch.cat([clf(x) for clf in self.classifiers], dim=1)  # (B, L) logits
+
+    def decode(self, logits):
+        """Hamming-distance decode to a class index, plus a softmax-like
+        per-class score (negative distance, normalized) usable wherever this
+        project expects per-class probabilities (ROC curves, confidence)."""
+        bits = torch.sigmoid(logits)  # (B, L) in [0, 1]
+        # distance from each sample's bit-vector to each class's code row
+        dist = torch.cdist(bits, self.codebook.to(bits.device), p=1)  # (B, n_classes)
+        pred = dist.argmin(dim=1)
+        scores = F.softmax(-dist, dim=1)  # closer code -> higher "probability"
+        return pred, scores
+
+
 def build_backbone(name, n_classes=6, freeze_features=True, finetune_head=False):
     """finetune_head: for each backbone, swaps the plain linear head for a
     2-layer MLP head (in_feats -> hidden -> n_classes, ReLU + dropout) and
@@ -277,6 +334,32 @@ def build_backbone(name, n_classes=6, freeze_features=True, finetune_head=False)
     raise ValueError(f"unknown backbone {name}")
 
 
+_FINAL_LAYER_ATTR = {
+    "resnet50": "fc", "densenet121": "classifier",
+    "mobilenet_v2": "classifier", "inception_v3": "fc",
+}
+
+
+def attach_ecoc_head(model, name, n_classes=6):
+    """Swaps whichever final layer build_backbone() installed (a plain Linear
+    or the --finetune_head MLP) for an EcocHead with the same input feature
+    size, keeping every other layer (frozen or fine-tuned) unchanged. The
+    replaced head's parameters are always trainable, matching how the
+    existing final layer is always trainable regardless of freeze_features."""
+    attr = _FINAL_LAYER_ATTR[name.lower()]
+    old_head = getattr(model, attr)
+    # both nn.Linear and the _mlp_head Sequential end in a Linear(-> n_classes);
+    # find its in_features to size the new head identically.
+    last_linear = old_head if isinstance(old_head, nn.Linear) else \
+        [m for m in old_head.modules() if isinstance(m, nn.Linear)][-1]
+    in_features = last_linear.in_features
+    head = EcocHead(in_features, n_classes)
+    setattr(model, attr, head)
+    for p in head.parameters():
+        p.requires_grad = True
+    return model
+
+
 def forward_logits(model, x, is_inception, training):
     """Inception in train mode returns (logits, aux_logits)."""
     out = model(x)
@@ -287,22 +370,54 @@ def forward_logits(model, x, is_inception, training):
     return out, None
 
 
+def loss_and_pred(raw_out, y, ecoc_head=None, class_weight=None):
+    """Single branch point for the two classification-head modes, used by
+    every training/eval loop so the softmax-CE path is completely unchanged
+    when ecoc_head is None:
+      - softmax mode (ecoc_head=None): raw_out is (B, n_classes) logits,
+        loss is CrossEntropyLoss, prediction is argmax, "probs" is softmax.
+      - ECOC mode: raw_out is (B, L) logits (L = n_classes-1 binary
+        classifiers), loss is BCEWithLogitsLoss against each class's
+        codebook row (summed over the L bits), prediction/probs come from
+        EcocHead.decode()'s Hamming-distance match.
+    Returns (loss_tensor, pred_indices_tensor, probs_tensor)."""
+    if ecoc_head is None:
+        ce = nn.CrossEntropyLoss(weight=class_weight)
+        loss = ce(raw_out, y)
+        pred = raw_out.argmax(1)
+        probs = F.softmax(raw_out, dim=1)
+        return loss, pred, probs
+    targets = ecoc_head.codebook.to(raw_out.device)[y]  # (B, L) target bits
+    bce = nn.BCEWithLogitsLoss(reduction="none")
+    per_bit_loss = bce(raw_out, targets)  # (B, L)
+    if class_weight is not None:
+        # class_weight is per-material-class (from class_weights_from); apply
+        # each sample's true-class weight across all its L bits so rare
+        # classes (e.g. trash) are upweighted the same way as in CE mode.
+        sample_w = class_weight.to(raw_out.device)[y].unsqueeze(1)  # (B, 1)
+        loss = (per_bit_loss * sample_w).mean()
+    else:
+        loss = per_bit_loss.mean()
+    pred, probs = ecoc_head.decode(raw_out)
+    return loss, pred, probs
+
+
 # ----------------------------------------------------------------------------
 # Train / eval
 # ----------------------------------------------------------------------------
 @torch.no_grad()
-def quick_eval_acc_loss(model, loader, device, is_inception, ce):
+def quick_eval_acc_loss(model, loader, device, is_inception, class_weight=None, ecoc_head=None):
     model.eval()
     tot_loss, n = 0.0, 0
     y_true, y_pred = [], []
     for x, y, _ in loader:
         x, y = x.to(device), y.to(device)
         logits, _ = forward_logits(model, x, is_inception, False)
-        loss = ce(logits, y)
+        loss, pred, _ = loss_and_pred(logits, y, ecoc_head, class_weight)
         tot_loss += loss.item() * x.size(0)
         n += x.size(0)
         y_true += y.tolist()
-        y_pred += logits.argmax(1).tolist()
+        y_pred += pred.tolist()
     model.train()
     acc = accuracy_score(y_true, y_pred)
     f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
@@ -310,7 +425,8 @@ def quick_eval_acc_loss(model, loader, device, is_inception, ce):
 
 
 def train_model(model, loader, device, epochs, is_inception, class_weight=None,
-                 val_loader=None, patience=None, lr_schedule="cosine", lr=3e-4):
+                 val_loader=None, patience=None, lr_schedule="cosine", lr=3e-4,
+                 ecoc_head=None):
     """Trains up to `epochs`. If val_loader and patience are both given, tracks
     the best epoch by validation loss, restores those weights at the end, and
     stops early once `patience` epochs pass with no improvement.
@@ -322,10 +438,14 @@ def train_model(model, loader, device, epochs, is_inception, class_weight=None,
     run tends to keep bouncing val_loss around its minimum late in training
     (visible as val_loss oscillating rather than settling) instead of
     settling into it; decaying lr fixes that without any architecture
-    change. Pass lr_schedule="none" to restore the old flat-lr behavior."""
-    assert lr_schedule in ("cosine", "none")
+    change. Pass lr_schedule="none" to restore the old flat-lr behavior.
+
+    ecoc_head: pass the model's EcocHead module (see attach_ecoc_head) to
+    train with the ECOC ordinal-code + BCE loss instead of softmax + CE;
+    leave None for the standard path. Inception's auxiliary classifier keeps
+    its own separate n_classes-wide softmax head either way (aux training
+    is skipped in ECOC mode since AuxLogits.fc was never replaced)."""
     model.to(device).train()
-    ce = nn.CrossEntropyLoss(weight=class_weight)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=1e-4)
     scheduler = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
@@ -347,14 +467,15 @@ def train_model(model, loader, device, epochs, is_inception, class_weight=None,
             for x, y, _ in loader:
                 x, y = x.to(device), y.to(device)
                 logits, aux = forward_logits(model, x, is_inception, True)
-                loss = ce(logits, y)
-                if aux is not None:
-                    loss = loss + 0.4 * ce(aux, y)
+                loss, pred, _ = loss_and_pred(logits, y, ecoc_head, class_weight)
+                if aux is not None and ecoc_head is None:
+                    aux_loss, _, _ = loss_and_pred(aux, y, None, class_weight)
+                    loss = loss + 0.4 * aux_loss
                 opt.zero_grad(); loss.backward(); opt.step()
                 tot_loss += loss.item() * x.size(0)
                 n += x.size(0)
                 y_true += y.tolist()
-                y_pred += logits.argmax(1).tolist()
+                y_pred += pred.tolist()
             train_loss = tot_loss / n
             train_acc = accuracy_score(y_true, y_pred)
             train_f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
@@ -369,7 +490,8 @@ def train_model(model, loader, device, epochs, is_inception, class_weight=None,
                    f"  Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f}, F1: {train_f1:.4f}")
 
             if val_loader is not None:
-                val_loss, val_acc, val_f1 = quick_eval_acc_loss(model, val_loader, device, is_inception, ce)
+                val_loss, val_acc, val_f1 = quick_eval_acc_loss(model, val_loader, device, is_inception,
+                                                                 class_weight, ecoc_head)
                 history["val_loss"].append(val_loss)
                 history["val_acc"].append(val_acc)
                 history["val_f1"].append(val_f1)
@@ -410,7 +532,7 @@ def train_model(model, loader, device, epochs, is_inception, class_weight=None,
 
 @torch.no_grad()
 def eval_model(model, loader, device, is_inception, n_samples=12, warmup_batches=2,
-                samples_per_class=2):
+                samples_per_class=2, ecoc_head=None):
     """Also measures inference latency/throughput on `device`: the first
     `warmup_batches` are excluded from timing (cudnn autotune / lazy init),
     each remaining batch is timed with a cuda synchronize so GPU latency is
@@ -447,8 +569,9 @@ def eval_model(model, loader, device, is_inception, n_samples=12, warmup_batches
                 batch_times.append(elapsed)
                 n_timed_images += x.size(0)
 
-            probs = F.softmax(logits, dim=1).cpu()
-            pred = probs.argmax(1)
+            _, pred, probs = loss_and_pred(logits, y, ecoc_head)
+            probs = probs.cpu()
+            pred = pred.cpu()
             material_pred += pred.tolist(); material_true += y.tolist(); recyclable_true += rec.tolist()
             probs_all.append(probs)
             for i in range(x.size(0)):
@@ -617,7 +740,7 @@ def class_weights_from(rows, device):
 
 
 def run_tag(protocol, aug_mode, finetune_head, class_weighted, lr_schedule,
-            lr=3e-4, bs=32):
+            lr=3e-4, bs=32, ecoc_head=False):
     """Builds a unique, self-describing folder name from the parameters that
     actually change a run's outcome, so every distinct configuration gets
     its own folder automatically instead of overwriting the previous run's
@@ -629,6 +752,8 @@ def run_tag(protocol, aug_mode, finetune_head, class_weighted, lr_schedule,
         parts.append("ft")
     if class_weighted:
         parts.append("cw")
+    if ecoc_head:
+        parts.append("ecoc")
     if lr_schedule != "cosine":
         parts.append(f"lr-{lr_schedule}")
     if lr != 3e-4:
@@ -662,6 +787,14 @@ def main():
                          "unfreezing the last backbone stage, instead of a fully-frozen "
                          "backbone + single linear head (see build_backbone docstring "
                          "for the per-architecture unfreeze target)")
+    ap.add_argument("--ecoc_head", action="store_true",
+                    help="replace the softmax head with an Error-Correcting Output Codes "
+                         "(ECOC) ensemble of n_classes-1 small binary ANN classifiers, "
+                         "decoded via Hamming distance -- from Wang, Heliyon 2024 "
+                         "(e29966), where it was the paper's largest ablated contribution "
+                         "(+3.68%% material accuracy on TrashNet, in-domain). Composable "
+                         "with --finetune_head (the ECOC head replaces whichever final "
+                         "layer that produces). See paper_household_garbage_ecoc_capsa.md.")
     ap.add_argument("--aug_mode", choices=["auto", "off", "mild", "strong"], default="auto",
                     help="training augmentation strength (val/test are never augmented). "
                          "'auto' (default) picks 'mild' for in_domain (no domain shift to "
@@ -702,7 +835,7 @@ def main():
     else:
         aug_mode = args.aug_mode
     tag = run_tag(args.protocol, aug_mode, args.finetune_head, args.class_weighted, args.lr_schedule,
-                  lr=args.lr, bs=args.bs)
+                  lr=args.lr, bs=args.bs, ecoc_head=args.ecoc_head)
 
     # per-backbone paths are resolved inside the loop (each backbone's folder
     # name includes its own name); these are the shared, single-command-wide
@@ -734,6 +867,12 @@ def main():
     for name in args.backbones:
         logger.info(f"\n=== {name} ===")
         model, input_size = build_backbone(name, finetune_head=args.finetune_head)
+        ecoc_head = None
+        if args.ecoc_head:
+            model = attach_ecoc_head(model, name)
+            ecoc_head = getattr(model, _FINAL_LAYER_ATTR[name.lower()])
+            logger.info(f"  ecoc_head: {6 - 1} binary classifiers (ordinal codebook), "
+                        f"replacing the softmax head")
         is_inc = name.lower() == "inception_v3"
         tr = DataLoader(ManifestDataset(train_rows, input_size, True, aug_mode),
                         args.bs, shuffle=True, num_workers=2)
@@ -742,8 +881,8 @@ def main():
         cw = class_weights_from(train_rows, device) if args.class_weighted else None
         model, history = train_model(model, tr, device, args.epochs, is_inc,
                                       class_weight=cw, val_loader=te, patience=args.patience,
-                                      lr_schedule=args.lr_schedule, lr=args.lr)
-        m = eval_model(model, te, device, is_inc)
+                                      lr_schedule=args.lr_schedule, lr=args.lr, ecoc_head=ecoc_head)
+        m = eval_model(model, te, device, is_inc, ecoc_head=ecoc_head)
         logger.info(f"  material_acc={m['material_acc']:.3f} macroF1={m['material_macro_f1']:.3f} "
                     f"recyclability_acc={m['recyclability_acc']:.3f} non_recyclable_recall={m['non_recyclable_recall']:.3f}")
         base = m["recyclability_acc_majority_baseline"]
@@ -779,6 +918,7 @@ def main():
             torch.save({
                 "backbone": name,
                 "finetune_head": args.finetune_head,
+                "ecoc_head": args.ecoc_head,
                 "input_size": input_size,
                 "materials": MATERIALS,
                 "material_recyclable": MATERIAL_RECYCLABLE,
