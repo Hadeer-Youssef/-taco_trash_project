@@ -31,3 +31,6 @@ env/
 Thumbs.db
 .vscode/
 .idea/
+#
+Application research of image classification algorithm based on deep learning in household garbage sorting.pdf
+paper_household_garbage_ecoc_capsa.md
