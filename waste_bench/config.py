@@ -40,6 +40,7 @@ class RunConfig:
     aug_mode: str = "auto"           # auto | off | mild | strong
     seed: int = 42
     amp: bool = False                # mixed precision (speed only)
+    workers: int = 2                 # DataLoader worker processes (speed only)
 
     # --- evaluation
     tta: bool = False                # average predictions over image + horizontal flip

@@ -71,6 +71,10 @@ def build_parser():
                    help="deprecated alias for --aug_mode off")
     g.add_argument("--seed", type=int, default=d.seed)
     g.add_argument("--amp", action="store_true", help="mixed precision on CUDA (faster)")
+    g.add_argument("--workers", type=int, default=d.workers,
+                   help="DataLoader worker processes. Image decoding is usually the "
+                        "bottleneck (GPU utilisation 40-70%%); Kaggle has 4 CPU cores, "
+                        "so --workers 4 is typically faster. Does not change results.")
 
     g = ap.add_argument_group("evaluation")
     g.add_argument("--tta", action="store_true",
@@ -138,9 +142,10 @@ def run_backbone(name, cfg, tag, device, rows):
                    if cfg.backbone_lr_mult != 1.0 else ""))
 
     aug = cfg.resolved_aug_mode()
-    train_loader = make_loader(train_rows, input_size, True, aug, cfg.bs)
-    test_loader = make_loader(test_rows, input_size, False, aug, cfg.bs)
-    val_loader = make_loader(val_rows, input_size, False, aug, cfg.bs) if val_rows else None
+    train_loader = make_loader(train_rows, input_size, True, aug, cfg.bs, cfg.workers)
+    test_loader = make_loader(test_rows, input_size, False, aug, cfg.bs, cfg.workers)
+    val_loader = (make_loader(val_rows, input_size, False, aug, cfg.bs, cfg.workers)
+                  if val_rows else None)
     select_loader = val_loader if cfg.resolved_select_on() == "val" else test_loader
     is_inc = name == "inception_v3"
     cw = class_weights_from(train_rows, device) if cfg.class_weighted else None

@@ -88,8 +88,11 @@ def select_rows(df, protocol):
 
 def make_loader(rows, input_size, train, aug_mode, bs, num_workers=2):
     ds = ManifestDataset(rows, input_size, train, aug_mode)
+    # persistent_workers keeps the worker processes alive between epochs; without
+    # it every epoch re-spawns them for both the train and the val loader
     return DataLoader(ds, bs, shuffle=train, num_workers=num_workers,
-                      pin_memory=torch.cuda.is_available())
+                      pin_memory=torch.cuda.is_available(),
+                      persistent_workers=num_workers > 0)
 
 
 def class_weights_from(rows, device):
