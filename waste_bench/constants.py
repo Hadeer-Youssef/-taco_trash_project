@@ -10,6 +10,9 @@ N_CLASSES = len(MATERIALS)
 MATERIAL_RECYCLABLE = [1, 1, 1, 1, 1, 0]
 
 BACKBONES = ["resnet50", "densenet121", "mobilenet_v2", "inception_v3"]
+# every backbone --backbones accepts; BACKBONES stays the default set so a
+# command that does not name backbones behaves as before
+ALL_BACKBONES = BACKBONES + ["convnext_tiny", "efficientnet_v2_s"]
 
 IMAGENET_MEAN_LIST = [0.485, 0.456, 0.406]
 IMAGENET_STD_LIST = [0.229, 0.224, 0.225]

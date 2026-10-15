@@ -7,7 +7,7 @@ import os
 import torch
 
 from .config import RunConfig, run_tag, UNFREEZE_LEVELS
-from .constants import BACKBONES, MATERIALS, MATERIAL_RECYCLABLE
+from .constants import ALL_BACKBONES, BACKBONES, MATERIALS, MATERIAL_RECYCLABLE
 from .data import load_manifest, select_rows, make_loader, class_weights_from
 from .engine import train_model, eval_model, quick_eval
 from .models import build_backbone, attach_ecoc_head, get_head, count_trainable
@@ -21,7 +21,7 @@ def build_parser():
     g = ap.add_argument_group("data / protocol")
     g.add_argument("--manifest", default=d.manifest)
     g.add_argument("--protocol", choices=["in_domain", "cross_domain", "joint"], default=d.protocol)
-    g.add_argument("--backbones", nargs="+", choices=BACKBONES, default=d.backbones)
+    g.add_argument("--backbones", nargs="+", choices=ALL_BACKBONES, default=d.backbones)
     g.add_argument("--select_on", choices=["auto", "val", "test"], default=d.select_on,
                    help="split used to pick the best epoch / early stop. 'auto' = the "
                         "held-out val split for in_domain and joint (test is then only "

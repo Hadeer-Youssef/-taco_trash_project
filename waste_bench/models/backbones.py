@@ -5,7 +5,11 @@ from torchvision import models
 
 from .heads import FINAL_LAYER_ATTR, mlp_head, custom_head
 
-INPUT_SIZE = {"resnet50": 224, "densenet121": 224, "mobilenet_v2": 224, "inception_v3": 299}
+# efficientnet_v2_s was trained at larger resolutions (300-384); 224 is used so
+# every backbone sees the same input size and the comparison isolates the
+# architecture. Raise it here to trade speed for accuracy.
+INPUT_SIZE = {"resnet50": 224, "densenet121": 224, "mobilenet_v2": 224, "inception_v3": 299,
+              "convnext_tiny": 224, "efficientnet_v2_s": 224}
 
 # Modules to unfreeze at each depth, from the output side inwards. "none" trains
 # only the head (linear probe); "all" fine-tunes every layer.
@@ -35,11 +39,28 @@ UNFREEZE_TARGETS = {
         "two_stages": lambda m: [m.Mixed_6a, m.Mixed_6b, m.Mixed_6c, m.Mixed_6d, m.Mixed_6e,
                                  m.Mixed_7a, m.Mixed_7b, m.Mixed_7c],
     },
+    # features = [stem, stage1, down, stage2, down, stage3, down, stage4]
+    "convnext_tiny": {
+        "last": lambda m: [m.features[7][2]],
+        "stage": lambda m: [m.features[7]],
+        "two_stages": lambda m: [m.features[5], m.features[6], m.features[7]],
+    },
+    # features = [stem, 3 fused stages, 3 MBConv stages, 1x1 head conv]; at 224px
+    # stages 4-5 run at 14x14 and 6 + head at 7x7 (like resnet's layer3/layer4)
+    "efficientnet_v2_s": {
+        "last": lambda m: [m.features[6][-1], m.features[7]],
+        "stage": lambda m: [m.features[6], m.features[7]],
+        "two_stages": lambda m: [m.features[4], m.features[5], m.features[6], m.features[7]],
+    },
 }
 
 # MLP head (hidden width, dropout) used when finetune_head is on
 MLP_HEAD = {"resnet50": (96, 0.5), "densenet121": (256, 0.3),
-            "mobilenet_v2": (256, 0.3), "inception_v3": (256, 0.3)}
+            "mobilenet_v2": (256, 0.3), "inception_v3": (256, 0.3),
+            "convnext_tiny": (256, 0.3), "efficientnet_v2_s": (256, 0.3)}
+
+# index of the Linear inside backbones whose classifier is a Sequential
+_LINEAR_IDX = {"mobilenet_v2": 1, "efficientnet_v2_s": 1, "convnext_tiny": 2}
 
 
 def _load_pretrained(name):
@@ -51,12 +72,18 @@ def _load_pretrained(name):
         return models.mobilenet_v2(weights="IMAGENET1K_V1")
     if name == "inception_v3":
         return models.inception_v3(weights="IMAGENET1K_V1", aux_logits=True)
+    if name == "convnext_tiny":
+        return models.convnext_tiny(weights="IMAGENET1K_V1")
+    if name == "efficientnet_v2_s":
+        return models.efficientnet_v2_s(weights="IMAGENET1K_V1")
     raise ValueError(f"unknown backbone {name}")
 
 
 def _feature_width(m, name):
     head = getattr(m, FINAL_LAYER_ATTR[name])
-    return head[1].in_features if name == "mobilenet_v2" else head.in_features
+    if name in _LINEAR_IDX:
+        return head[_LINEAR_IDX[name]].in_features
+    return head.in_features
 
 
 def build_backbone(name, n_classes=6, freeze_features=True, finetune_head=False, unfreeze=None,
@@ -83,10 +110,16 @@ def build_backbone(name, n_classes=6, freeze_features=True, finetune_head=False,
     elif finetune_head:
         hidden, dropout = MLP_HEAD[name]
         head = mlp_head(in_features, hidden, n_classes, dropout)
-    elif name == "mobilenet_v2":
+    elif name in ("mobilenet_v2", "efficientnet_v2_s"):
         head = nn.Sequential(nn.Dropout(0.2), nn.Linear(in_features, n_classes))
     else:
         head = nn.Linear(in_features, n_classes)
+    if name == "convnext_tiny":
+        # keep the pretrained LayerNorm2d + Flatten in front of the new head;
+        # the norm is part of the head, so it trains even when the rest is frozen
+        for p in m.classifier[0].parameters():
+            p.requires_grad = True
+        head = nn.Sequential(m.classifier[0], m.classifier[1], head)
     setattr(m, FINAL_LAYER_ATTR[name], head)
     if name == "inception_v3" and m.AuxLogits is not None:
         m.AuxLogits.fc = nn.Linear(m.AuxLogits.fc.in_features, n_classes)

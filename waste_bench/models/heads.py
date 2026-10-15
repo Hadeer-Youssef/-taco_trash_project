@@ -14,6 +14,7 @@ import torch.nn.functional as F
 FINAL_LAYER_ATTR = {
     "resnet50": "fc", "densenet121": "classifier",
     "mobilenet_v2": "classifier", "inception_v3": "fc",
+    "convnext_tiny": "classifier", "efficientnet_v2_s": "classifier",
 }
 
 
@@ -97,6 +98,10 @@ def attach_ecoc_head(model, name, n_classes=6, codebook_type="ordinal"):
     MLP) with an EcocHead fed by the same backbone features. The input width is
     the FIRST Linear's in_features (e.g. 2048 for resnet50) — the MLP's last
     Linear only sees its hidden width (e.g. 96)."""
+    if name.lower() == "convnext_tiny":
+        # its classifier is LayerNorm2d -> Flatten -> head; swapping the whole
+        # attribute for an EcocHead would drop the norm and the flatten
+        raise NotImplementedError("--ecoc_head is not supported for convnext_tiny")
     attr = FINAL_LAYER_ATTR[name.lower()]
     old_head = getattr(model, attr)
     first_linear = old_head if isinstance(old_head, nn.Linear) else \
