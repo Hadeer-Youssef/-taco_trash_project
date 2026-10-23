@@ -71,8 +71,31 @@ def select_rows(df, protocol):
     if protocol == "taco_only":
         if wild.empty:
             raise ValueError("taco_only requires a manifest containing domain='wild' rows")
-        return (rec(wild[wild.split == "train"]), rec(wild[wild.split == "val"]),
-                rec(wild[wild.split == "test"]))
+        # If the v3 policy-aware columns exist, train/evaluate only rows explicitly
+        # eligible for strict evaluation and use the v3 target, not the legacy label.
+        if "strict_eval_include" in wild.columns:
+            wild = wild[wild["strict_eval_include"].fillna(0).astype(int) == 1].copy()
+        if "recyclable_v3" in wild.columns:
+            wild = wild[wild["recyclable_v3"].notna()].copy()
+            wild["recyclable"] = wild["recyclable_v3"].astype(int)
+        if wild.empty:
+            raise ValueError("No eligible TACO rows remain. Build benchmark_v3/manifest_v3.csv first.")
+        splits = {s: wild[wild.split == s] for s in ("train", "val", "test")}
+        if any(part.empty for part in splits.values()):
+            raise ValueError(
+                "taco_only requires non-empty TACO train/val/test splits; "
+                "check benchmark_v3/manifest_v3.csv and strict-evaluation filtering."
+            )
+        logger.info("TACO-only strict rows: train=%d val=%d test=%d",
+                    len(splits["train"]), len(splits["val"]), len(splits["test"]))
+        if "photo" in wild.columns:
+            overlap = (
+                set(splits["train"]["photo"].dropna())
+                & set(splits["test"]["photo"].dropna())
+            )
+            if overlap:
+                raise ValueError(f"TACO photo leakage: {len(overlap)} source photos overlap train/test")
+        return rec(splits["train"]), rec(splits["val"]), rec(splits["test"])
     if protocol == "cross_domain":
         return rec(clean), rec(wild[wild.split == "val"]), rec(wild[wild.split == "test"])
     if protocol == "joint":
