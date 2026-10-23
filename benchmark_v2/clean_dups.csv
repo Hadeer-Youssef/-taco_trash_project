@@ -1,0 +1,15 @@
+cluster_size,md5_dup,paths,spans_splits
+8,0,cardboard221.jpg | cardboard311.jpg | cardboard83.jpg | paper110.jpg | paper385.jpg | paper493.jpg | paper50.jpg | paper582.jpg,train
+2,1,glass115.jpg | metal91.jpg,train
+2,1,glass176.jpg | plastic152.jpg,train
+2,1,glass389.jpg | plastic332.jpg,train
+2,0,metal394.jpg | metal76.jpg,train
+2,0,paper147.jpg | paper99.jpg,train
+2,0,paper185.jpg | paper390.jpg,"train,val"
+2,0,paper204.jpg | paper477.jpg,"train,val"
+3,0,paper277.jpg | paper444.jpg | paper54.jpg,"train,val"
+2,0,paper305.jpg | paper308.jpg,train
+2,0,paper345.jpg | paper451.jpg,train
+2,0,paper459.jpg | paper466.jpg,train
+2,0,paper68.jpg | paper74.jpg,train
+2,0,plastic118.jpg | plastic137.jpg,"test,train"
