@@ -67,3 +67,36 @@ Choose and document the actual recycling policy (country/municipality/facility),
 review conditional categories against an authoritative source, version the policy,
 and manually audit cross-label exact duplicates in TrashNet. Then update the
 mapping decisions with evidence and keep an audit trail for every changed label.
+
+## TACO-only model experiment
+
+After generating and validating the v3 manifest, run the dual-head benchmark with
+`--protocol taco_only`. This protocol trains only on TACO's train split and
+selects the best epoch on TACO validation; the held-out TACO test split is used
+only for final metrics. The split is inherited from `manifest_v2.csv`, where
+TACO crops are grouped by source photo.
+
+Example with two supported backbones (replace these names with the two models
+that actually ranked best in your TrashNet-only results):
+
+```bash
+python -m benchmark_v2.waste_bench.cli_dual \
+  --manifest benchmark_v3/manifest_v3.csv \
+  --protocol taco_only \
+  --backbones resnet50 convnext_tiny \
+  --finetune_head --unfreeze two_stages --backbone_lr_mult 0.3 \
+  --class_weighted --label_smoothing 0.1 --tta \
+  --epochs 30 --patience 8 \
+  --runs_dir benchmark_v3/runs
+```
+
+The new protocol filters out rows with `strict_eval_include != 1` and uses
+`recyclable_v3`, not the legacy `recyclable`, for the recyclability head.
+It checks train/test source-photo overlap before training. Output metrics and
+checkpoints are stored under `benchmark_v3/runs/<backbone>/...`.
+
+Do not compare this result directly against older TACO test scores until the
+test split and label policy are identical. Report material macro-F1, binary
+recyclability macro-F1, non-recyclable recall, AUC, per-class support, and the
+majority baseline; accuracy alone can hide class imbalance. Use the same two
+backbones and comparable optimization settings for a fair comparison.
