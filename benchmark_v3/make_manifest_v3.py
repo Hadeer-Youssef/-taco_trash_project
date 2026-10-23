@@ -1,11 +1,11 @@
 """
 Build manifest_v3.csv from the existing, photo-grouped manifest_v2.csv.
 
-This is intentionally a non-destructive label audit layer:
-- legacy 'recyclable' stays untouched for reproducing prior experiments;
-- recyclable_v3 is blank/unknown for rows requiring policy or condition review;
-- strict_eval_include filters those rows out of strict metrics;
-- split assignments and image paths are preserved exactly.
+This is a non-destructive label audit layer: legacy labels and split assignments
+remain unchanged, while unresolved TACO labels become unknown for strict use.
+TrashNet has only coarse material labels, so it is excluded from strict binary
+recyclability evaluation but remains available for legacy comparisons/material
+classification.
 
 Run from repository root:
   python benchmark_v3/make_manifest_v3.py
@@ -27,7 +27,7 @@ def main():
     parser.add_argument("--out", default=str(here / "manifest_v3.csv"))
     parser.add_argument(
         "--strict-only", action="store_true",
-        help="write only rows eligible for strict evaluation; default keeps all rows and flags them",
+        help="write only rows eligible for strict binary recyclability evaluation",
     )
     args = parser.parse_args()
 
@@ -40,23 +40,23 @@ def main():
         raise SystemExit(f"Manifest missing columns: {sorted(required_manifest - set(manifest.columns))}")
     if required_mapping - set(mapping.columns):
         raise SystemExit(f"Mapping missing columns: {sorted(required_mapping - set(mapping.columns))}")
-
     if mapping["taco_category"].duplicated().any():
         raise SystemExit("Mapping contains duplicate taco_category names")
 
     labels = mapping.set_index("taco_category")["recyclability_label_v3"].to_dict()
     include = mapping.set_index("taco_category")["strict_eval_include"].to_dict()
-
     wild_mask = manifest["domain"].eq("wild")
     missing = sorted(set(manifest.loc[wild_mask, "taco_category"].dropna()) - set(labels))
     if missing:
         raise SystemExit(f"Wild categories absent from v3 mapping: {missing}")
 
-    # Clean/TrashNet rows do not have item-level TACO category labels.
-    # Keep their legacy coarse label, but explicitly mark their source limitation.
+    # Keep legacy values for reproducibility; new target uses nullable integer.
     manifest["recyclable_v3"] = manifest["recyclable"].astype("Int64")
-    manifest["strict_eval_include"] = 1
-    manifest["label_source_note"] = "TrashNet coarse material-level legacy label"
+    # TrashNet has material-level labels, not item-level recycling policy labels.
+    # Keep it for legacy/material experiments, but not strict binary recyclability.
+    manifest["strict_eval_include"] = 0
+    manifest["label_source_note"] = "TrashNet coarse material-level legacy label; excluded from strict binary recyclability evaluation"
+
     for idx in manifest.index[wild_mask]:
         category = manifest.at[idx, "taco_category"]
         label = labels[category]
@@ -80,10 +80,10 @@ def main():
 
     print(f"Wrote: {out}")
     print(f"Rows: {len(manifest)}")
-    print(f"Rows eligible for strict evaluation: {int(manifest['strict_eval_include'].sum())}")
+    print(f"Rows eligible for strict binary recyclability evaluation: {int(manifest['strict_eval_include'].sum())}")
     print(f"Rows with unknown v3 recyclability: {int(manifest['recyclable_v3'].isna().sum())}")
     print("Legacy 'recyclable' column and split assignments are preserved.")
-    print("Warning: TrashNet labels remain coarse material-level labels, not item-level policy truth.")
+    print("TrashNet remains available but is excluded from strict binary recyclability evaluation.")
 
 
 if __name__ == "__main__":
