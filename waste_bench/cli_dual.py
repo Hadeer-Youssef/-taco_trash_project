@@ -26,21 +26,28 @@ def parse_args(argv=None):
     ap.add_argument("--rec_weight", type=float, default=1.0,
                     help="weight of the recyclability loss relative to the material loss "
                          "(0 = train material only, the recyclability head stays untrained)")
+    ap.add_argument("--no_rec_class_weights", action="store_true",
+                    help="with --class_weighted, weight only the material loss; the "
+                         "recyclability loss stays unweighted (in cross_domain the clean "
+                         "training set has 5%% non-recyclable, so its inverse-frequency "
+                         "weight is ~17:1)")
     kw = vars(ap.parse_args(argv))
     rec_weight = kw.pop("rec_weight")
+    no_rec_cw = kw.pop("no_rec_class_weights")
     if kw.pop("no_domain_randomize"):
         kw["aug_mode"] = "off"
     cfg = RunConfig(**kw)
     if cfg.ecoc_head:
         raise SystemExit("--ecoc_head is not supported with the dual head")
-    return cfg, rec_weight
+    return cfg, rec_weight, no_rec_cw
 
 
-def dual_tag(cfg, rec_weight):
-    return run_tag(cfg) + "_dual" + (f"-rw{rec_weight:g}" if rec_weight != 1.0 else "")
+def dual_tag(cfg, rec_weight, no_rec_cw=False):
+    return (run_tag(cfg) + "_dual" + (f"-rw{rec_weight:g}" if rec_weight != 1.0 else "")
+            + ("-norcw" if no_rec_cw else ""))
 
 
-def run_backbone_dual(name, cfg, rec_weight, tag, device, rows):
+def run_backbone_dual(name, cfg, rec_weight, no_rec_cw, tag, device, rows):
     train_rows, val_rows, test_rows = rows
     logger.info(f"\n=== {name} (dual head: {N_CLASSES} materials + 2 recyclability) ===")
     model, input_size = build_backbone(name, n_classes=N_OUTPUTS, finetune_head=cfg.finetune_head,
@@ -61,7 +68,8 @@ def run_backbone_dual(name, cfg, rec_weight, tag, device, rows):
     w_mat = w_rec = None
     if cfg.class_weighted:
         w_mat = class_weights_by(train_rows, "material", N_CLASSES, device, MATERIALS)
-        w_rec = class_weights_by(train_rows, "recyclable", 2, device, REC_NAMES)
+        if not no_rec_cw:
+            w_rec = class_weights_by(train_rows, "recyclable", 2, device, REC_NAMES)
 
     model, history = train_dual(
         model, train_loader, device, cfg.epochs, is_inc, w_mat, w_rec, rec_weight,
@@ -116,8 +124,8 @@ def run_backbone_dual(name, cfg, rec_weight, tag, device, rows):
     return m_json
 
 
-def run(cfg, rec_weight):
-    tag = dual_tag(cfg, rec_weight)
+def run(cfg, rec_weight, no_rec_cw=False):
+    tag = dual_tag(cfg, rec_weight, no_rec_cw)
     out = cfg.out or os.path.join(cfg.runs_dir, "_summaries", f"{tag}.json")
     log_file = cfg.log_file or os.path.join(cfg.runs_dir, "_summaries", f"{tag}.log")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
@@ -135,7 +143,7 @@ def run(cfg, rec_weight):
     results = {}
     for name in cfg.backbones:
         set_seed(cfg.seed)
-        results[name] = run_backbone_dual(name, cfg, rec_weight, tag, device, rows)
+        results[name] = run_backbone_dual(name, cfg, rec_weight, no_rec_cw, tag, device, rows)
 
     with open(out, "w") as f:
         json.dump({"tag": tag, "config": cfg.to_dict(), "rec_weight": rec_weight,
