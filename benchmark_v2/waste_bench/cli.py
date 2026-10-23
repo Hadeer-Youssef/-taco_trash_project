@@ -20,7 +20,7 @@ def build_parser():
     d = RunConfig()
     g = ap.add_argument_group("data / protocol")
     g.add_argument("--manifest", default=d.manifest)
-    g.add_argument("--protocol", choices=["in_domain", "cross_domain", "joint"], default=d.protocol)
+    g.add_argument("--protocol", choices=["in_domain", "taco_only", "cross_domain", "joint"], default=d.protocol)
     g.add_argument("--backbones", nargs="+", choices=ALL_BACKBONES, default=d.backbones)
     g.add_argument("--select_on", choices=["auto", "val", "test"], default=d.select_on,
                    help="split used to pick the best epoch / early stop. 'auto' = the "
