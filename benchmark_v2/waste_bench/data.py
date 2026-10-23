@@ -12,16 +12,7 @@ from .utils import logger
 
 
 def build_transform(input_size, train, aug_mode="strong"):
-    """aug_mode controls on-the-fly variation for TRAIN samples only
-    (val/test are always plain resize + normalize):
-
-      "off"    : RandomResizedCrop + RandomHorizontalFlip only
-      "mild"   : "off" + small rotation / vertical flip / shift+shear — geometric
-                 variety that doesn't touch colour/texture
-      "strong" : "mild" + colour jitter, grayscale, blur — the domain-randomizing
-                 set meant to fight the clean/wild gap (cross_domain, joint); it
-                 makes the task harder with no payoff when train and test share a
-                 domain (in_domain)."""
+    """Augment training images only; validation/test remain deterministic."""
     assert aug_mode in ("off", "mild", "strong")
     norm = transforms.Normalize(IMAGENET_MEAN_LIST, IMAGENET_STD_LIST)
     if not train:
@@ -59,31 +50,29 @@ class ManifestDataset(Dataset):
 
 def load_manifest(path):
     df = pd.read_csv(path)
-    # manifest.csv was written on Windows; normalise so it also works on Linux/Kaggle
     df["path"] = df["path"].str.replace("\\", "/", regex=False)
     return df
 
 
 def select_rows(df, protocol):
-    """Returns (train_rows, val_rows, test_rows) as lists of dicts.
+    """Returns (train_rows, val_rows, test_rows).
 
-      P1 in_domain    : train clean/train -> val clean/val -> test clean/test
-      P2 cross_domain : train clean/all   -> val wild/val    -> test wild/test
-      P3 joint        : train clean+wild/train -> val wild/val -> test wild/test
-
-    P2 was `test clean/all -> (no val) -> test wild/all`; under manifest_v2 the
-    wild domain is photo-grouped, so P2 gets a real held-out wild val split for
-    epoch selection and tests on the untouched wild test split (393 crops /
-    151 photos). This is the schema the paper should describe as
-    "zero-shot target domain with a labelled target validation split".
-
-    val_rows is never None; every protocol selects on val."""
+    in_domain: original TrashNet-only protocol (clean split).
+    taco_only: TACO-only protocol, grouped by source photo (wild split).
+    cross_domain: train on clean, validate/test on held-out wild.
+    joint: train on clean+wild train; validate/test on wild val/test.
+    """
     clean = df[df.domain == "clean"]
     wild = df[df.domain == "wild"]
     rec = lambda d: d.to_dict("records")
     if protocol == "in_domain":
         return (rec(clean[clean.split == "train"]), rec(clean[clean.split == "val"]),
                 rec(clean[clean.split == "test"]))
+    if protocol == "taco_only":
+        if wild.empty:
+            raise ValueError("taco_only requires a manifest containing domain='wild' rows")
+        return (rec(wild[wild.split == "train"]), rec(wild[wild.split == "val"]),
+                rec(wild[wild.split == "test"]))
     if protocol == "cross_domain":
         return rec(clean), rec(wild[wild.split == "val"]), rec(wild[wild.split == "test"])
     if protocol == "joint":
@@ -94,15 +83,13 @@ def select_rows(df, protocol):
 
 def make_loader(rows, input_size, train, aug_mode, bs, num_workers=2):
     ds = ManifestDataset(rows, input_size, train, aug_mode)
-    # persistent_workers keeps the worker processes alive between epochs; without
-    # it every epoch re-spawns them for both the train and the val loader
     return DataLoader(ds, bs, shuffle=train, num_workers=num_workers,
                       pin_memory=torch.cuda.is_available(),
                       persistent_workers=num_workers > 0)
 
 
 def class_weights_from(rows, device):
-    """Inverse-frequency weights per material, computed from the training rows."""
+    """Inverse-frequency weights per material, computed from training rows."""
     raw_counts = np.bincount([r["material"] for r in rows], minlength=N_CLASSES).astype(float)
     counts = raw_counts.copy()
     counts[counts == 0] = 1.0
